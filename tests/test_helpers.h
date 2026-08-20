@@ -38,6 +38,25 @@ int test_write_text(
     const char *text);
 
 /**
+ * @brief Read a complete fixture text file into a caller-provided buffer.
+ *
+ * The result is terminated with a null character. Files that do not fit in the
+ * buffer are rejected rather than silently truncated.
+ *
+ * @param[in] directory Directory containing the file.
+ * @param[in] filename Name of the file to read.
+ * @param[out] destination Buffer that receives the file contents.
+ * @param[in] capacity Size of @p destination in bytes.
+ *
+ * @return 0 on success, or -1 on failure with @c errno set.
+ */
+int test_read_text(
+    const char *directory,
+    const char *filename,
+    char *destination,
+    size_t capacity);
+
+/**
  * @brief Create or replace a fixture file with an exact logical size.
  *
  * This is useful for sparse mock resources whose addressable size matters but

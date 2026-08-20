@@ -66,6 +66,74 @@ int test_write_text(
     return close(descriptor);
 }
 
+int test_read_text(
+    const char *directory,
+    const char *filename,
+    char *destination,
+    size_t capacity)
+{
+    if (destination == NULL || capacity == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    char path[PATH_MAX];
+    if (test_build_path(path, sizeof(path), directory, filename) == -1) {
+        return -1;
+    }
+
+    int descriptor = open(path, O_RDONLY | O_CLOEXEC);
+    if (descriptor == -1) {
+        return -1;
+    }
+
+    size_t used = 0;
+    while (used < capacity - 1) {
+        ssize_t received = read(descriptor, destination + used, capacity - 1 - used);
+        if (received == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            int read_error = errno;
+            close(descriptor);
+            errno = read_error;
+            return -1;
+        }
+
+        if (received == 0) {
+            destination[used] = '\0';
+            return close(descriptor);
+        }
+
+        used += (size_t)received;
+    }
+
+    // The buffer is full, so read one more byte to distinguish an exact fit
+    // from a file that would otherwise be silently truncated.
+    char extra;
+    ssize_t received;
+    do {
+        received = read(descriptor, &extra, sizeof(extra));
+    } while (received == -1 && errno == EINTR);
+
+    if (received == -1) {
+        int read_error = errno;
+        close(descriptor);
+        errno = read_error;
+        return -1;
+    }
+
+    if (received != 0) {
+        close(descriptor);
+        errno = ENOBUFS;
+        return -1;
+    }
+
+    destination[used] = '\0';
+    return close(descriptor);
+}
+
 int test_create_sized_file(
     const char *directory,
     const char *filename,

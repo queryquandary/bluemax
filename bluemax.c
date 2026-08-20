@@ -6,6 +6,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "gpu_mmio.h"
+#include "gpu_pstate.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -45,18 +46,6 @@ enum {
 
 /** Mask for the samples evaluated by the graphics activity trigger. */
 #define GRAPHICS_TRIGGER_MASK ((1ULL << GRAPHICS_TRIGGER_WINDOW) - 1ULL)
-
-/**
- * @brief GPU performance states observed or selected by the governor.
- *
- * BlueMax selects LOW or HIGH automatically. MEDIUM is currently observed but
- * never selected directly.
- */
-enum gpu_pstate {
-    GPU_PSTATE_LOW,    /**< Low-power state selected while the GPU is idle. */
-    GPU_PSTATE_MEDIUM, /**< Intermediate state observed but not selected. */
-    GPU_PSTATE_HIGH    /**< High-performance state selected during activity. */
-};
 
 /** @brief Runtime state and resources owned by the single-threaded governor. */
 struct governor_context {
