@@ -43,7 +43,6 @@ static volatile const uint32_t *register_at(void *bar0_address, size_t offset)
     return (volatile const uint32_t *)((const uint8_t *)bar0_address + offset);
 }
 
-/** @copydoc gpu_mmio_map() */
 int gpu_mmio_map(const char *resource_path, struct gpu_mmio *gpu)
 {
     if (resource_path == NULL || gpu == NULL) {
@@ -108,7 +107,6 @@ int gpu_mmio_map(const char *resource_path, struct gpu_mmio *gpu)
     return 0;
 }
 
-/** @copydoc gpu_mmio_read_activity() */
 void gpu_mmio_read_activity(
     const struct gpu_mmio *gpu,
     struct gpu_activity_sample *sample)
@@ -119,7 +117,6 @@ void gpu_mmio_read_activity(
     sample->pppp = *gpu->pppp_reg;
 }
 
-/** @copydoc gpu_mmio_unmap() */
 int gpu_mmio_unmap(struct gpu_mmio *gpu)
 {
     if (gpu == NULL || gpu->bar0_address == NULL || gpu->bar0_length == 0) {
