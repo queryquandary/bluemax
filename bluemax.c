@@ -5,6 +5,8 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include "gpu_mmio.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
@@ -44,14 +46,6 @@ enum {
 /** Mask for the samples evaluated by the graphics activity trigger. */
 #define GRAPHICS_TRIGGER_MASK ((1ULL << GRAPHICS_TRIGGER_WINDOW) - 1ULL)
 
-/** Byte offsets of the read-only engine-status registers within NVIDIA BAR0. */
-enum {
-    PGRAPH_REGISTER_OFFSET = 0x400700,
-    PVLD_REGISTER_OFFSET = 0x084048,
-    PPDEC_REGISTER_OFFSET = 0x08504c,
-    PPPP_REGISTER_OFFSET = 0x08604c
-};
-
 /**
  * @brief GPU performance states observed or selected by the governor.
  *
@@ -62,14 +56,6 @@ enum gpu_pstate {
     GPU_PSTATE_LOW,    /**< Low-power state selected while the GPU is idle. */
     GPU_PSTATE_MEDIUM, /**< Intermediate state observed but not selected. */
     GPU_PSTATE_HIGH    /**< High-performance state selected during activity. */
-};
-
-/** @brief Snapshot of the graphics and hardware video engine-status registers. */
-struct gpu_activity_sample {
-    uint32_t pgraph; /**< Graphics engine status. */
-    uint32_t pvld;   /**< Video decoder engine status. */
-    uint32_t ppdec;  /**< Video parser/decoder engine status. */
-    uint32_t pppp;   /**< Video post-processing engine status. */
 };
 
 /** @brief Runtime state and resources owned by the single-threaded governor. */
@@ -100,20 +86,8 @@ struct governor_context {
     /** Nouveau's cached thermal hysteresis, in millidegrees Celsius. */
     int temp_max_hyst_millidegrees;
 
-    /** Read-only BAR0 mapping retained for the daemon's lifetime. */
-    void *bar0_address;
-
-    /** Address of the graphics engine-status register. */
-    volatile const uint32_t *pgraph_reg;
-
-    /** Address of the video decoder engine-status register. */
-    volatile const uint32_t *pvld_reg;
-
-    /** Address of the video parser/decoder engine-status register. */
-    volatile const uint32_t *ppdec_reg;
-
-    /** Address of the video post-processing engine-status register. */
-    volatile const uint32_t *pppp_reg;
+    /** Read-only GPU BAR0 mapping and resolved activity registers. */
+    struct gpu_mmio gpu;
 };
 
 int main(void)
