@@ -2,6 +2,7 @@
 #define BLUEMAX_TEST_HELPERS_H
 
 #include <stddef.h>
+#include <sys/types.h>
 
 /**
  * @brief Join a directory and filename without allowing silent truncation.
@@ -35,6 +36,43 @@ int test_write_text(
     const char *directory,
     const char *filename,
     const char *text);
+
+/**
+ * @brief Create or replace a fixture file with an exact logical size.
+ *
+ * This is useful for sparse mock resources whose addressable size matters but
+ * whose contents do not need to consume equivalent physical storage.
+ *
+ * @param[in] directory Directory that will contain the file.
+ * @param[in] filename Name of the file to create or replace.
+ * @param[in] size Required logical size in bytes.
+ *
+ * @return 0 on success, or -1 on failure with @c errno set.
+ */
+int test_create_sized_file(
+    const char *directory,
+    const char *filename,
+    off_t size);
+
+/**
+ * @brief Write bytes at a specific offset in an existing fixture file.
+ *
+ * Interrupted and partial writes are handled so the complete value is stored.
+ *
+ * @param[in] directory Directory containing the file.
+ * @param[in] filename Name of the existing file.
+ * @param[in] data Bytes to write.
+ * @param[in] length Number of bytes to write.
+ * @param[in] offset Byte offset at which writing begins.
+ *
+ * @return 0 on success, or -1 on failure with @c errno set.
+ */
+int test_write_bytes_at(
+    const char *directory,
+    const char *filename,
+    const void *data,
+    size_t length,
+    off_t offset);
 
 /**
  * @brief Remove one known test-fixture file on a best-effort basis.
