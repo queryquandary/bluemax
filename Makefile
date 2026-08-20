@@ -4,8 +4,8 @@ CFLAGS += -std=c11 -Wall -Wextra -Wpedantic
 
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/bluemax
-SOURCES := bluemax.c thermal.c
-HEADERS := thermal.h
+SOURCES := bluemax.c gpu_mmio.c thermal.c
+HEADERS := gpu_mmio.h thermal.h
 TEST_TARGET := $(BUILD_DIR)/test_thermal
 TEST_SOURCES := tests/test_thermal.c tests/test_helpers.c thermal.c
 TEST_HEADERS := tests/test_helpers.h
