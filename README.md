@@ -60,10 +60,10 @@ PPPP    0x08604c
 The current activity model is:
 
 ```text
-graphics_active =
+graphics_activity_detected =
     PGRAPH != 0
 
-video_active =
+video_activity_detected =
     PVLD != 0
     OR PPDEC != 0
     OR PPPP != 0
@@ -148,7 +148,17 @@ Normal automatic operation resumes only after the GPU temperature falls below th
 
 GPU temperature is sampled approximately once per second.
 
+If temperature telemetry remains unavailable for three seconds, BlueMax forces the LOW pstate. Normal operation resumes when valid telemetry returns, subject to the maximum-temperature limit and hysteresis.
+
 BlueMax does not modify Nouveau's thermal thresholds or attempt to replace the driver's existing thermal-management functionality.
+
+## Governor Policy Module
+
+`governor_policy.c/.h` implements the governor decisions as a pure, deterministic state machine.
+
+Each policy step receives explicit activity, temperature-observation, and monotonic-time inputs. It updates the rolling histories and safety state, then returns the recommended pstate and flags describing meaningful events such as workload upshifts, idle downshifts, thermal limiting, and telemetry faults or recoveries.
+
+The policy module performs no file access, MMIO access, clock reads, sleeping, logging, or direct pstate writes. This keeps it independently testable and allows a future console mode to display meaningful decisions without reporting every 10 ms sample.
 
 ## MMIO Access
 
@@ -226,7 +236,9 @@ This is one of the primary reasons BlueMax explicitly monitors the hardware vide
 
 BlueMax is currently under development.
 
-The governor policy and low-level telemetry approach have been designed and validated experimentally. The daemon implementation is the next phase of development.
+Thermal telemetry, read-only GPU activity telemetry, Nouveau pstate control, and the pure governor policy module are implemented and covered by unit tests using synthetic files and inputs. The tests do not access the real GPU, `/sys`, or debugfs.
+
+The daemon loop, runtime hardware integration, signal handling, console output, and systemd service are not yet implemented.
 
 ## Scope
 
