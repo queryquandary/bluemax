@@ -15,6 +15,9 @@ enum {
     /** Required continuous inactivity before returning to LOW. */
     IDLE_DOWNSHIFT_DELAY_MS = 2000,
 
+    /** Time without valid temperature telemetry before forcing LOW. */
+    TEMPERATURE_FAULT_TIMEOUT_MS = 3000,
+
     /** Number of recent samples considered by the video activity trigger. */
     VIDEO_TRIGGER_WINDOW = 3,
 
@@ -63,22 +66,18 @@ static bool interval_has_elapsed(uint64_t now_ms, uint64_t since_ms, uint64_t du
 }
 
 /**
- * @brief Apply maximum-temperature limiting and hysteresis recovery.
+ * @brief Apply maximum-temperature limiting to a valid sample.
  *
- * Observations other than a fresh valid sample are ignored by this helper.
- * Reaching the configured maximum immediately forces LOW. Once active, the
- * limit clears only below the recovery threshold.
+ * The caller must supply a fresh valid temperature observation. Reaching the
+ * configured maximum immediately forces LOW. Once active, the limit clears
+ * only below the recovery threshold.
  *
  * @param[in,out] policy Policy state to update.
  * @param[in] input Current policy inputs.
  * @param[in,out] result Step result receiving recommendations and events.
  */
-static void process_valid_temperature(struct governor_policy *policy, const struct governor_policy_input *input, struct governor_policy_result *result)
+static void apply_temperature_limits(struct governor_policy *policy, const struct governor_policy_input *input, struct governor_policy_result *result)
 {
-    // Don't do anything if a valid temperature sample isn't available.
-    if (input->temperature_observation != GOVERNOR_TEMPERATURE_VALID)
-        return;
-
     if (input->temperature_millidegrees >= policy->temperature_max_millidegrees)
     {
         if (!policy->thermal_limit_active)
@@ -96,6 +95,62 @@ static void process_valid_temperature(struct governor_policy *policy, const stru
     {
         policy->thermal_limit_active = false;
         result->events |= GOVERNOR_POLICY_EVENT_THERMAL_RECOVERY;
+    }
+}
+
+/**
+ * @brief Process one temperature observation and its safety effects.
+ *
+ * The first failed read starts the failure interval. Later failures and steps
+ * without a scheduled poll preserve that starting time. A valid sample clears
+ * the interval, reports recovery only if the safety timeout was active, and is
+ * then evaluated against the configured temperature limits.
+ *
+ * @param[in,out] policy Policy state to update.
+ * @param[in] input Current policy inputs.
+ * @param[in,out] result Step result receiving recommendations and events.
+ */
+static void process_temperature_observation(
+    struct governor_policy *policy,
+    const struct governor_policy_input *input,
+    struct governor_policy_result *result)
+{
+    // Valid telemetry ends the entire failure interval. A transient failure
+    // clears silently, while recovery from an active safety fault is reported.
+    if (input->temperature_observation == GOVERNOR_TEMPERATURE_VALID)
+    {
+        // Report recovery only when the timeout had already forced safe mode.
+        if (policy->temperature_fault_active)
+            result->events |= GOVERNOR_POLICY_EVENT_TEMPERATURE_RECOVERY;
+
+        policy->temperature_failure_pending = false;
+        policy->temperature_fault_active = false;
+        apply_temperature_limits(policy, input, result);
+        return;
+    }
+
+    // The first failed read establishes the start of continuous telemetry
+    // loss. Later failures must not move the timeout forward.
+    if (input->temperature_observation == GOVERNOR_TEMPERATURE_READ_FAILED && !policy->temperature_failure_pending)
+    {
+        policy->temperature_failure_pending = true;
+        policy->temperature_failure_since_ms = input->now_ms;
+    }
+
+    // Evaluate the pending interval on every policy step, including steps when
+    // temperature was not polled. Latch the fault once and immediately force
+    // the safe LOW target when the timeout expires.
+    if (policy->temperature_failure_pending
+        && !policy->temperature_fault_active
+        && interval_has_elapsed(
+            input->now_ms,
+            policy->temperature_failure_since_ms,
+            TEMPERATURE_FAULT_TIMEOUT_MS))
+    {
+        policy->temperature_fault_active = true;
+        policy->target_pstate = GPU_PSTATE_LOW;
+        result->recommended_pstate = policy->target_pstate;
+        result->events |= GOVERNOR_POLICY_EVENT_TEMPERATURE_FAULT;
     }
 }
 
@@ -150,7 +205,7 @@ struct governor_policy_result governor_policy_step(struct governor_policy *polic
         .events = GOVERNOR_POLICY_EVENT_NONE,
     };
 
-    process_valid_temperature(policy, input, &result);
+    process_temperature_observation(policy, input, &result);
 
     if (policy->thermal_limit_active || policy->temperature_fault_active)
         return result;

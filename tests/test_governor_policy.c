@@ -108,6 +108,33 @@ static struct governor_policy_result apply_temperature(
 }
 
 /**
+ * @brief Apply one failed temperature read with optional activity.
+ *
+ * @param[in,out] policy Policy that receives the failed observation.
+ * @param[in] now_ms Current monotonic time in milliseconds.
+ * @param[in] graphics_activity_detected Whether graphics activity is present.
+ * @param[in] video_activity_detected Whether hardware video activity is present.
+ *
+ * @return Result produced by the governor policy.
+ */
+static struct governor_policy_result apply_temperature_failure(
+    struct governor_policy *policy,
+    uint64_t now_ms,
+    bool graphics_activity_detected,
+    bool video_activity_detected)
+{
+    const struct governor_policy_input input = {
+        .now_ms = now_ms,
+        .graphics_activity_detected = graphics_activity_detected,
+        .video_activity_detected = video_activity_detected,
+        .temperature_observation = GOVERNOR_TEMPERATURE_READ_FAILED,
+        .temperature_millidegrees = 0,
+    };
+
+    return governor_policy_step(policy, &input);
+}
+
+/**
  * @brief Verify initialization of each supported startup pstate.
  *
  * @return 0 when every case passes, or -1 when a check fails.
@@ -585,6 +612,125 @@ static int test_activity_upshifts_when_thermal_limit_recovers(void)
     return 0;
 }
 
+/**
+ * @brief Verify that valid telemetry clears a temporary failure interval.
+ *
+ * @return 0 when a short failure does not become a fault, or -1 on failure.
+ */
+static int test_temporary_temperature_failure_recovers(void)
+{
+    struct governor_policy policy;
+    CHECK(initialize_low_policy(&policy, 19000) == 0);
+
+    struct governor_policy_result result =
+        apply_temperature_failure(&policy, 19010, false, false);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    CHECK(policy.temperature_failure_pending);
+    CHECK(policy.temperature_failure_since_ms == 19010);
+    CHECK(!policy.temperature_fault_active);
+
+    result = apply_temperature_failure(&policy, 21010, false, false);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    CHECK(policy.temperature_failure_since_ms == 19010);
+
+    result = apply_temperature(
+        &policy,
+        22009,
+        SAFE_TEMPERATURE_MILLIDEGREES,
+        false,
+        false);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    CHECK(!policy.temperature_failure_pending);
+    CHECK(!policy.temperature_fault_active);
+
+    result = apply_activity(&policy, 23010, false, false);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    CHECK(!policy.temperature_fault_active);
+
+    return 0;
+}
+
+/**
+ * @brief Verify fault activation immediately before and at its timeout.
+ *
+ * @return 0 when three seconds of failure force LOW once, or -1 on failure.
+ */
+static int test_temperature_failure_timeout_forces_low(void)
+{
+    struct governor_policy policy;
+    CHECK(governor_policy_init(
+              &policy,
+              GPU_PSTATE_HIGH,
+              TEMPERATURE_MAX_MILLIDEGREES,
+              TEMPERATURE_HYSTERESIS_MILLIDEGREES,
+              SAFE_TEMPERATURE_MILLIDEGREES,
+              24000) == 0);
+
+    struct governor_policy_result result =
+        apply_temperature_failure(&policy, 24010, false, true);
+    CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+
+    result = apply_activity(&policy, 27009, false, true);
+    CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    CHECK(!policy.temperature_fault_active);
+
+    result = apply_activity(&policy, 27010, false, true);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_TEMPERATURE_FAULT);
+    CHECK(policy.temperature_failure_pending);
+    CHECK(policy.temperature_fault_active);
+
+    result = apply_temperature_failure(&policy, 27020, false, true);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+
+    return 0;
+}
+
+/**
+ * @brief Verify workload upshift when valid telemetry clears a fault.
+ *
+ * @return 0 when recovery and activity events are both reported, or -1 on
+ *         failure.
+ */
+static int test_activity_upshifts_when_temperature_fault_recovers(void)
+{
+    struct governor_policy policy;
+    CHECK(initialize_low_policy(&policy, 28000) == 0);
+
+    apply_temperature_failure(&policy, 28010, false, true);
+    struct governor_policy_result result =
+        apply_activity(&policy, 31010, false, true);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_TEMPERATURE_FAULT);
+
+    result = apply_temperature(
+        &policy,
+        31020,
+        SAFE_TEMPERATURE_MILLIDEGREES,
+        false,
+        true);
+    CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
+    CHECK(result.events
+          == (GOVERNOR_POLICY_EVENT_TEMPERATURE_RECOVERY
+              | GOVERNOR_POLICY_EVENT_VIDEO_UPSHIFT));
+    CHECK(!policy.temperature_failure_pending);
+    CHECK(!policy.temperature_fault_active);
+    CHECK(policy.high_since_ms == 31020);
+
+    result = apply_temperature(
+        &policy,
+        31030,
+        SAFE_TEMPERATURE_MILLIDEGREES,
+        false,
+        true);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+
+    return 0;
+}
+
 int main(void)
 {
     int failures = 0;
@@ -604,6 +750,9 @@ int main(void)
     failures += test_thermal_limit_immediately_forces_low() != 0;
     failures += test_thermal_limit_uses_strict_hysteresis() != 0;
     failures += test_activity_upshifts_when_thermal_limit_recovers() != 0;
+    failures += test_temporary_temperature_failure_recovers() != 0;
+    failures += test_temperature_failure_timeout_forces_low() != 0;
+    failures += test_activity_upshifts_when_temperature_fault_recovers() != 0;
 
     if (failures != 0) {
         fprintf(stderr, "%d governor policy test group(s) failed\n", failures);
