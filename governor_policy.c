@@ -9,6 +9,12 @@
 #include <string.h>
 
 enum {
+    /** Minimum time the governor must remain in HIGH. */
+    HIGH_MIN_RESIDENCY_MS = 500,
+
+    /** Required continuous inactivity before returning to LOW. */
+    IDLE_DOWNSHIFT_DELAY_MS = 2000,
+
     /** Number of recent samples considered by the video activity trigger. */
     VIDEO_TRIGGER_WINDOW = 3,
 
@@ -32,18 +38,28 @@ enum {
  * @return @c true when at least @p required samples are active, otherwise
  *         @c false.
  */
-static bool history_reaches_threshold(
-    uint64_t history,
-    unsigned int window,
-    unsigned int required)
+static bool history_reaches_threshold(uint64_t history, unsigned int window, unsigned int required)
 {
     unsigned int active_samples = 0;
 
-    for (unsigned int index = 0; index < window; index++) {
+    for (unsigned int index = 0; index < window; index++)
         active_samples += (unsigned int)((history >> index) & 1U);
-    }
 
     return active_samples >= required;
+}
+
+/**
+ * @brief Determine whether a monotonic-time interval reached its duration.
+ *
+ * @param[in] now_ms Current monotonic time in milliseconds.
+ * @param[in] since_ms Monotonic time at which the interval began.
+ * @param[in] duration_ms Required interval duration in milliseconds.
+ *
+ * @return @c true when the duration has elapsed, otherwise @c false.
+ */
+static bool interval_has_elapsed(uint64_t now_ms, uint64_t since_ms, uint64_t duration_ms)
+{
+    return now_ms - since_ms >= duration_ms;
 }
 
 int governor_policy_init(
@@ -66,14 +82,15 @@ int governor_policy_init(
     struct governor_policy initialized;
     memset(&initialized, 0, sizeof(initialized));
 
-    initialized.desired_pstate = initial_pstate == GPU_PSTATE_HIGH ? GPU_PSTATE_HIGH : GPU_PSTATE_LOW;
+    initialized.target_pstate = initial_pstate == GPU_PSTATE_HIGH ? GPU_PSTATE_HIGH : GPU_PSTATE_LOW;
     initialized.high_since_ms = now_ms;
     initialized.last_activity_ms = now_ms;
     initialized.temperature_max_millidegrees = temperature_max_millidegrees;
     initialized.temperature_hysteresis_millidegrees = temperature_hysteresis_millidegrees;
 
-    if (initial_temperature_millidegrees >= temperature_max_millidegrees) {
-        initialized.desired_pstate = GPU_PSTATE_LOW;
+    if (initial_temperature_millidegrees >= temperature_max_millidegrees)
+    {
+        initialized.target_pstate = GPU_PSTATE_LOW;
         initialized.thermal_limit_active = true;
     }
 
@@ -81,48 +98,50 @@ int governor_policy_init(
     return 0;
 }
 
-struct governor_policy_result governor_policy_step(
-    struct governor_policy *policy,
-    const struct governor_policy_input *input)
+struct governor_policy_result governor_policy_step(struct governor_policy *policy, const struct governor_policy_input *input)
 {
-    policy->graphics_history =
-        (policy->graphics_history << 1) | (input->graphics_active ? 1U : 0U);
-    policy->video_history =
-        (policy->video_history << 1) | (input->video_active ? 1U : 0U);
+    policy->graphics_history = (policy->graphics_history << 1) | (input->graphics_activity_detected ? 1U : 0U);
+    policy->video_history = (policy->video_history << 1) | (input->video_activity_detected ? 1U : 0U);
 
-    if (input->graphics_active || input->video_active) {
+    bool activity_detected = input->graphics_activity_detected || input->video_activity_detected;
+
+    if (activity_detected)
         policy->last_activity_ms = input->now_ms;
-    }
 
     struct governor_policy_result result = {
-        .desired_pstate = policy->desired_pstate,
+        .recommended_pstate = policy->target_pstate,
         .events = GOVERNOR_POLICY_EVENT_NONE,
     };
 
-    bool graphics_triggered = history_reaches_threshold(
-        policy->graphics_history,
-        GRAPHICS_TRIGGER_WINDOW,
-        GRAPHICS_TRIGGER_COUNT);
-    bool video_triggered = history_reaches_threshold(
-        policy->video_history,
-        VIDEO_TRIGGER_WINDOW,
-        VIDEO_TRIGGER_COUNT);
+    // Decide if we should upshift to HIGH or downshift to LOW based on activity and temperature.
+    if (policy->target_pstate == GPU_PSTATE_LOW && !policy->thermal_limit_active && !policy->temperature_fault_active)
+    {
+        bool graphics_triggered = history_reaches_threshold(policy->graphics_history, GRAPHICS_TRIGGER_WINDOW, GRAPHICS_TRIGGER_COUNT);
+        bool video_triggered = history_reaches_threshold(policy->video_history, VIDEO_TRIGGER_WINDOW, VIDEO_TRIGGER_COUNT);
 
-    if (policy->desired_pstate == GPU_PSTATE_LOW
+        if (graphics_triggered || video_triggered)
+        {
+            policy->high_since_ms = input->now_ms;
+            policy->target_pstate = GPU_PSTATE_HIGH;
+            result.recommended_pstate = policy->target_pstate;
+
+            if (graphics_triggered)
+                result.events |= GOVERNOR_POLICY_EVENT_GRAPHICS_UPSHIFT;
+
+            if (video_triggered)
+                result.events |= GOVERNOR_POLICY_EVENT_VIDEO_UPSHIFT;
+        }
+    }
+    else if (policy->target_pstate == GPU_PSTATE_HIGH
         && !policy->thermal_limit_active
         && !policy->temperature_fault_active
-        && (graphics_triggered || video_triggered)) {
-        policy->desired_pstate = GPU_PSTATE_HIGH;
-        policy->high_since_ms = input->now_ms;
-
-        if (graphics_triggered) {
-            result.events |= GOVERNOR_POLICY_EVENT_GRAPHICS_UPSHIFT;
-        }
-        if (video_triggered) {
-            result.events |= GOVERNOR_POLICY_EVENT_VIDEO_UPSHIFT;
-        }
-
-        result.desired_pstate = policy->desired_pstate;
+        && !activity_detected
+        && interval_has_elapsed(input->now_ms, policy->high_since_ms, HIGH_MIN_RESIDENCY_MS)
+        && interval_has_elapsed(input->now_ms, policy->last_activity_ms, IDLE_DOWNSHIFT_DELAY_MS))
+    {
+        policy->target_pstate = GPU_PSTATE_LOW;
+        result.recommended_pstate = policy->target_pstate;
+        result.events |= GOVERNOR_POLICY_EVENT_IDLE_DOWNSHIFT;
     }
 
     return result;

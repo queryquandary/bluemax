@@ -26,13 +26,13 @@ enum governor_temperature_observation {
  */
 enum governor_policy_event {
     GOVERNOR_POLICY_EVENT_NONE = 0,
-    GOVERNOR_POLICY_EVENT_GRAPHICS_UPSHIFT = 1U << 0,
-    GOVERNOR_POLICY_EVENT_VIDEO_UPSHIFT = 1U << 1,
-    GOVERNOR_POLICY_EVENT_IDLE_DOWNSHIFT = 1U << 2,
-    GOVERNOR_POLICY_EVENT_THERMAL_LIMIT = 1U << 3,
-    GOVERNOR_POLICY_EVENT_THERMAL_RECOVERY = 1U << 4,
-    GOVERNOR_POLICY_EVENT_TEMPERATURE_FAULT = 1U << 5,
-    GOVERNOR_POLICY_EVENT_TEMPERATURE_RECOVERY = 1U << 6
+    GOVERNOR_POLICY_EVENT_GRAPHICS_UPSHIFT = 1,
+    GOVERNOR_POLICY_EVENT_VIDEO_UPSHIFT = 2,
+    GOVERNOR_POLICY_EVENT_IDLE_DOWNSHIFT = 4,
+    GOVERNOR_POLICY_EVENT_THERMAL_LIMIT = 8,
+    GOVERNOR_POLICY_EVENT_THERMAL_RECOVERY = 16,
+    GOVERNOR_POLICY_EVENT_TEMPERATURE_FAULT = 32,
+    GOVERNOR_POLICY_EVENT_TEMPERATURE_RECOVERY = 64
 };
 
 /** @brief Inputs for one deterministic governor policy step. */
@@ -41,10 +41,10 @@ struct governor_policy_input {
     uint64_t now_ms;
 
     /** Whether the current sample shows graphics-engine activity. */
-    bool graphics_active;
+    bool graphics_activity_detected;
 
     /** Whether the current sample shows hardware video-engine activity. */
-    bool video_active;
+    bool video_activity_detected;
 
     /** Kind of temperature telemetry supplied with this step. */
     enum governor_temperature_observation temperature_observation;
@@ -58,8 +58,8 @@ struct governor_policy_input {
 
 /** @brief Output from one governor policy step. */
 struct governor_policy_result {
-    /** Performance state currently desired by the automatic policy. */
-    enum gpu_pstate desired_pstate;
+    /** Performance state the policy recommends that the runtime apply. */
+    enum gpu_pstate recommended_pstate;
 
     /** Bitwise combination of values from enum governor_policy_event. */
     unsigned int events;
@@ -67,8 +67,8 @@ struct governor_policy_result {
 
 /** @brief State retained between deterministic governor policy steps. */
 struct governor_policy {
-    /** Performance state currently desired by the automatic policy. */
-    enum gpu_pstate desired_pstate;
+    /** Performance state the policy is currently trying to maintain. */
+    enum gpu_pstate target_pstate;
 
     /** Graphics activity history, with the newest sample in bit 0. */
     uint64_t graphics_history;
@@ -134,7 +134,7 @@ int governor_policy_init(
  * @param[in,out] policy Previously initialized policy state.
  * @param[in] input Inputs for the current policy step.
  *
- * @return The desired performance state and any meaningful policy events.
+ * @return The recommended performance state and any meaningful policy events.
  */
 struct governor_policy_result governor_policy_step(
     struct governor_policy *policy,
