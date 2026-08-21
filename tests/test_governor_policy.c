@@ -335,6 +335,44 @@ static int test_keeps_activity_histories_separate(void)
 }
 
 /**
+ * @brief Verify that activity older than each trigger window is ignored.
+ *
+ * @return 0 when expired graphics and video samples cannot request HIGH, or
+ *         -1 on failure.
+ */
+static int test_ignores_activity_outside_trigger_windows(void)
+{
+    struct governor_policy video_policy;
+    CHECK(initialize_low_policy(&video_policy, 3500) == 0);
+
+    apply_activity(&video_policy, 3510, false, true);
+    apply_activity(&video_policy, 3520, false, false);
+    apply_activity(&video_policy, 3530, false, false);
+    struct governor_policy_result result =
+        apply_activity(&video_policy, 3540, false, true);
+
+    // The earlier active sample has moved outside the newest three samples.
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+
+    struct governor_policy graphics_policy;
+    CHECK(initialize_low_policy(&graphics_policy, 3600) == 0);
+
+    apply_activity(&graphics_policy, 3610, true, false);
+    apply_activity(&graphics_policy, 3620, true, false);
+    apply_activity(&graphics_policy, 3630, false, false);
+    apply_activity(&graphics_policy, 3640, false, false);
+    apply_activity(&graphics_policy, 3650, false, false);
+    result = apply_activity(&graphics_policy, 3660, true, false);
+
+    // Only two active samples remain inside the newest five samples.
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+
+    return 0;
+}
+
+/**
  * @brief Verify that simultaneous trigger causes are both reported.
  *
  * @return 0 when both event flags are present, or -1 on failure.
@@ -731,6 +769,84 @@ static int test_activity_upshifts_when_temperature_fault_recovers(void)
     return 0;
 }
 
+/**
+ * @brief Verify that unsafe telemetry recovery remains thermally inhibited.
+ *
+ * @return 0 when recovered telemetry at the maximum still recommends LOW, or
+ *         -1 on failure.
+ */
+static int test_unsafe_temperature_fault_recovery_stays_low(void)
+{
+    struct governor_policy policy;
+    CHECK(initialize_low_policy(&policy, 32000) == 0);
+
+    apply_temperature_failure(&policy, 32010, false, false);
+    struct governor_policy_result result =
+        apply_activity(&policy, 35010, false, false);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_TEMPERATURE_FAULT);
+    CHECK(policy.temperature_fault_active);
+
+    result = apply_temperature(
+        &policy,
+        35020,
+        TEMPERATURE_MAX_MILLIDEGREES,
+        false,
+        false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events
+          == (GOVERNOR_POLICY_EVENT_TEMPERATURE_RECOVERY
+              | GOVERNOR_POLICY_EVENT_THERMAL_LIMIT));
+    CHECK(!policy.temperature_failure_pending);
+    CHECK(!policy.temperature_fault_active);
+    CHECK(policy.thermal_limit_active);
+
+    return 0;
+}
+
+/**
+ * @brief Verify recovery when thermal and telemetry safety gates are active.
+ *
+ * @return 0 when activity is retained and both recoveries are reported, or
+ *         -1 on failure.
+ */
+static int test_recovers_from_thermal_limit_and_temperature_fault(void)
+{
+    struct governor_policy policy;
+    CHECK(governor_policy_init(
+              &policy,
+              GPU_PSTATE_LOW,
+              TEMPERATURE_MAX_MILLIDEGREES,
+              TEMPERATURE_HYSTERESIS_MILLIDEGREES,
+              TEMPERATURE_MAX_MILLIDEGREES,
+              36000) == 0);
+
+    apply_temperature_failure(&policy, 36010, true, false);
+    struct governor_policy_result result =
+        apply_activity(&policy, 39010, true, false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_TEMPERATURE_FAULT);
+    CHECK(policy.thermal_limit_active);
+    CHECK(policy.temperature_fault_active);
+
+    result = apply_activity(&policy, 39020, true, false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    CHECK(policy.last_activity_ms == 39020);
+    CHECK(policy.graphics_history != 0);
+
+    result = apply_temperature(&policy, 39030, 91999, false, false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
+    CHECK(result.events
+          == (GOVERNOR_POLICY_EVENT_GRAPHICS_UPSHIFT
+              | GOVERNOR_POLICY_EVENT_THERMAL_RECOVERY
+              | GOVERNOR_POLICY_EVENT_TEMPERATURE_RECOVERY));
+    CHECK(!policy.thermal_limit_active);
+    CHECK(!policy.temperature_failure_pending);
+    CHECK(!policy.temperature_fault_active);
+
+    return 0;
+}
+
 int main(void)
 {
     int failures = 0;
@@ -741,6 +857,7 @@ int main(void)
     failures += test_video_activity_requests_high() != 0;
     failures += test_graphics_activity_requests_high() != 0;
     failures += test_keeps_activity_histories_separate() != 0;
+    failures += test_ignores_activity_outside_trigger_windows() != 0;
     failures += test_reports_simultaneous_activity_triggers() != 0;
     failures += test_does_not_repeat_upshift_events() != 0;
     failures += test_thermal_limit_blocks_activity_upshift() != 0;
@@ -753,6 +870,8 @@ int main(void)
     failures += test_temporary_temperature_failure_recovers() != 0;
     failures += test_temperature_failure_timeout_forces_low() != 0;
     failures += test_activity_upshifts_when_temperature_fault_recovers() != 0;
+    failures += test_unsafe_temperature_fault_recovery_stays_low() != 0;
+    failures += test_recovers_from_thermal_limit_and_temperature_fault() != 0;
 
     if (failures != 0) {
         fprintf(stderr, "%d governor policy test group(s) failed\n", failures);
