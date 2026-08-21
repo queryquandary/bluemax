@@ -207,6 +207,10 @@ struct governor_policy_result governor_policy_step(struct governor_policy *polic
 
     process_temperature_observation(policy, input, &result);
 
+    // If a temperature limit or temperature fault is active then the target P-state will 
+    // already be ensured to be GPU_PSTATE_LOW, courtesy of process_temperature_observation().
+    // That means no further policy decisions need to be made and we can return early 
+    // with the current result.
     if (policy->thermal_limit_active || policy->temperature_fault_active)
         return result;
 
