@@ -79,6 +79,35 @@ static struct governor_policy_result apply_activity(
 }
 
 /**
+ * @brief Apply one valid temperature sample with optional activity.
+ *
+ * @param[in,out] policy Policy that receives the sample.
+ * @param[in] now_ms Current monotonic time in milliseconds.
+ * @param[in] temperature_millidegrees Fresh temperature sample.
+ * @param[in] graphics_activity_detected Whether graphics activity is present.
+ * @param[in] video_activity_detected Whether hardware video activity is present.
+ *
+ * @return Result produced by the governor policy.
+ */
+static struct governor_policy_result apply_temperature(
+    struct governor_policy *policy,
+    uint64_t now_ms,
+    int temperature_millidegrees,
+    bool graphics_activity_detected,
+    bool video_activity_detected)
+{
+    const struct governor_policy_input input = {
+        .now_ms = now_ms,
+        .graphics_activity_detected = graphics_activity_detected,
+        .video_activity_detected = video_activity_detected,
+        .temperature_observation = GOVERNOR_TEMPERATURE_VALID,
+        .temperature_millidegrees = temperature_millidegrees,
+    };
+
+    return governor_policy_step(policy, &input);
+}
+
+/**
  * @brief Verify initialization of each supported startup pstate.
  *
  * @return 0 when every case passes, or -1 when a check fails.
@@ -456,6 +485,106 @@ static int test_enforces_minimum_high_residency(void)
     return 0;
 }
 
+/**
+ * @brief Verify that reaching the maximum temperature immediately forces LOW.
+ *
+ * @return 0 when thermal limiting overrides HIGH residency, or -1 on failure.
+ */
+static int test_thermal_limit_immediately_forces_low(void)
+{
+    struct governor_policy policy;
+    CHECK(governor_policy_init(
+              &policy,
+              GPU_PSTATE_HIGH,
+              TEMPERATURE_MAX_MILLIDEGREES,
+              TEMPERATURE_HYSTERESIS_MILLIDEGREES,
+              SAFE_TEMPERATURE_MILLIDEGREES,
+              16000) == 0);
+
+    struct governor_policy_result result = apply_temperature(
+        &policy,
+        16010,
+        TEMPERATURE_MAX_MILLIDEGREES,
+        true,
+        true);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_THERMAL_LIMIT);
+    CHECK(policy.target_pstate == GPU_PSTATE_LOW);
+    CHECK(policy.thermal_limit_active);
+
+    result = apply_temperature(&policy, 16020, 96000, true, true);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    CHECK(policy.thermal_limit_active);
+
+    return 0;
+}
+
+/**
+ * @brief Verify strict hysteresis before thermal limiting recovers.
+ *
+ * @return 0 when recovery occurs only below its threshold, or -1 on failure.
+ */
+static int test_thermal_limit_uses_strict_hysteresis(void)
+{
+    struct governor_policy policy;
+    CHECK(governor_policy_init(
+              &policy,
+              GPU_PSTATE_LOW,
+              TEMPERATURE_MAX_MILLIDEGREES,
+              TEMPERATURE_HYSTERESIS_MILLIDEGREES,
+              TEMPERATURE_MAX_MILLIDEGREES,
+              17000) == 0);
+
+    struct governor_policy_result result =
+        apply_temperature(&policy, 17010, 92000, false, false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    CHECK(policy.thermal_limit_active);
+
+    result = apply_temperature(&policy, 17020, 91999, false, false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_THERMAL_RECOVERY);
+    CHECK(!policy.thermal_limit_active);
+
+    result = apply_temperature(&policy, 17030, 91000, false, false);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+
+    return 0;
+}
+
+/**
+ * @brief Verify workload upshift on the same step as thermal recovery.
+ *
+ * @return 0 when both meaningful events are reported, or -1 on failure.
+ */
+static int test_activity_upshifts_when_thermal_limit_recovers(void)
+{
+    struct governor_policy policy;
+    CHECK(governor_policy_init(
+              &policy,
+              GPU_PSTATE_LOW,
+              TEMPERATURE_MAX_MILLIDEGREES,
+              TEMPERATURE_HYSTERESIS_MILLIDEGREES,
+              TEMPERATURE_MAX_MILLIDEGREES,
+              18000) == 0);
+
+    struct governor_policy_result result =
+        apply_activity(&policy, 18010, false, true);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+
+    result = apply_temperature(&policy, 18020, 91999, false, true);
+    CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
+    CHECK(result.events
+          == (GOVERNOR_POLICY_EVENT_THERMAL_RECOVERY
+              | GOVERNOR_POLICY_EVENT_VIDEO_UPSHIFT));
+    CHECK(!policy.thermal_limit_active);
+    CHECK(policy.high_since_ms == 18020);
+
+    return 0;
+}
+
 int main(void)
 {
     int failures = 0;
@@ -472,6 +601,9 @@ int main(void)
     failures += test_downshifts_after_continuous_inactivity() != 0;
     failures += test_activity_resets_inactivity_timer() != 0;
     failures += test_enforces_minimum_high_residency() != 0;
+    failures += test_thermal_limit_immediately_forces_low() != 0;
+    failures += test_thermal_limit_uses_strict_hysteresis() != 0;
+    failures += test_activity_upshifts_when_thermal_limit_recovers() != 0;
 
     if (failures != 0) {
         fprintf(stderr, "%d governor policy test group(s) failed\n", failures);

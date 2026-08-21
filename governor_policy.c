@@ -62,6 +62,43 @@ static bool interval_has_elapsed(uint64_t now_ms, uint64_t since_ms, uint64_t du
     return now_ms - since_ms >= duration_ms;
 }
 
+/**
+ * @brief Apply maximum-temperature limiting and hysteresis recovery.
+ *
+ * Observations other than a fresh valid sample are ignored by this helper.
+ * Reaching the configured maximum immediately forces LOW. Once active, the
+ * limit clears only below the recovery threshold.
+ *
+ * @param[in,out] policy Policy state to update.
+ * @param[in] input Current policy inputs.
+ * @param[in,out] result Step result receiving recommendations and events.
+ */
+static void process_valid_temperature(struct governor_policy *policy, const struct governor_policy_input *input, struct governor_policy_result *result)
+{
+    // Don't do anything if a valid temperature sample isn't available.
+    if (input->temperature_observation != GOVERNOR_TEMPERATURE_VALID)
+        return;
+
+    if (input->temperature_millidegrees >= policy->temperature_max_millidegrees)
+    {
+        if (!policy->thermal_limit_active)
+            result->events |= GOVERNOR_POLICY_EVENT_THERMAL_LIMIT;
+
+        policy->thermal_limit_active = true;
+        policy->target_pstate = GPU_PSTATE_LOW;
+        result->recommended_pstate = policy->target_pstate;
+        return;
+    }
+
+    int recovery_temperature = policy->temperature_max_millidegrees - policy->temperature_hysteresis_millidegrees;
+
+    if (policy->thermal_limit_active && input->temperature_millidegrees < recovery_temperature)
+    {
+        policy->thermal_limit_active = false;
+        result->events |= GOVERNOR_POLICY_EVENT_THERMAL_RECOVERY;
+    }
+}
+
 int governor_policy_init(
     struct governor_policy *policy,
     enum gpu_pstate initial_pstate,
@@ -113,8 +150,13 @@ struct governor_policy_result governor_policy_step(struct governor_policy *polic
         .events = GOVERNOR_POLICY_EVENT_NONE,
     };
 
+    process_valid_temperature(policy, input, &result);
+
+    if (policy->thermal_limit_active || policy->temperature_fault_active)
+        return result;
+
     // Decide if we should upshift to HIGH or downshift to LOW based on activity and temperature.
-    if (policy->target_pstate == GPU_PSTATE_LOW && !policy->thermal_limit_active && !policy->temperature_fault_active)
+    if (policy->target_pstate == GPU_PSTATE_LOW)
     {
         bool graphics_triggered = history_reaches_threshold(policy->graphics_history, GRAPHICS_TRIGGER_WINDOW, GRAPHICS_TRIGGER_COUNT);
         bool video_triggered = history_reaches_threshold(policy->video_history, VIDEO_TRIGGER_WINDOW, VIDEO_TRIGGER_COUNT);
@@ -133,8 +175,6 @@ struct governor_policy_result governor_policy_step(struct governor_policy *polic
         }
     }
     else if (policy->target_pstate == GPU_PSTATE_HIGH
-        && !policy->thermal_limit_active
-        && !policy->temperature_fault_active
         && !activity_detected
         && interval_has_elapsed(input->now_ms, policy->high_since_ms, HIGH_MIN_RESIDENCY_MS)
         && interval_has_elapsed(input->now_ms, policy->last_activity_ms, IDLE_DOWNSHIFT_DELAY_MS))
