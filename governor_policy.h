@@ -128,8 +128,17 @@ int governor_policy_init(
 /**
  * @brief Process one activity sample and optional temperature observation.
  *
- * Inputs must use nondecreasing monotonic timestamps. The returned event flags
- * describe only meaningful changes caused by this step.
+ * This function is called on the governor's trusted sampling path and does not
+ * validate programmer-error inputs. The returned event flags describe only
+ * meaningful changes caused by this step.
+ *
+ * @pre @p policy is non-null and was successfully initialized by
+ *      governor_policy_init().
+ * @pre @p input is non-null.
+ * @pre @p input uses one of the defined governor_temperature_observation
+ *      values.
+ * @pre @p input provides a monotonic timestamp greater than or equal to the
+ *      timestamp supplied during initialization or the preceding step.
  *
  * @param[in,out] policy Previously initialized policy state.
  * @param[in] input Inputs for the current policy step.
