@@ -95,7 +95,7 @@ HIGH  -> 0f
 
 The intermediate `07` state is recognized but is not currently selected by the automatic policy.
 
-Activity is sampled every:
+By default, activity is sampled every:
 
 ```text
 10 ms
@@ -112,6 +112,8 @@ Video:
 Graphics:
     3 active samples among the most recent 5
 ```
+
+These triggers are sample-based. Increasing the activity sampling interval increases workload-trigger latency proportionally.
 
 Once HIGH is entered:
 
@@ -146,7 +148,7 @@ If the GPU reaches `temp1_max`, BlueMax forces the LOW pstate.
 
 Normal automatic operation resumes only after the GPU temperature falls below the recovery threshold.
 
-GPU temperature is sampled approximately once per second.
+By default, GPU temperature is sampled approximately once per second.
 
 If temperature telemetry remains unavailable for three seconds, BlueMax forces the LOW pstate. Normal operation resumes when valid telemetry returns, subject to the maximum-temperature limit and hysteresis.
 
@@ -158,7 +160,7 @@ BlueMax does not modify Nouveau's thermal thresholds or attempt to replace the d
 
 Each policy step receives explicit activity, temperature-observation, and monotonic-time inputs. It updates the rolling histories and safety state, then returns the recommended pstate and flags describing meaningful events such as workload upshifts, idle downshifts, thermal limiting, and telemetry faults or recoveries.
 
-The policy module performs no file access, MMIO access, clock reads, sleeping, logging, or direct pstate writes. This keeps it independently testable and allows a future console mode to display meaningful decisions without reporting every 10 ms sample.
+The policy module performs no file access, MMIO access, clock reads, sleeping, logging, or direct pstate writes. This keeps it independently testable and allows a future console mode to display meaningful decisions without reporting every activity sample.
 
 ## MMIO Access
 
@@ -207,11 +209,46 @@ The main loop uses:
 CLOCK_MONOTONIC
 ```
 
-with absolute 10 ms sampling deadlines.
+with absolute sampling deadlines. The default deadline interval is 10 ms.
 
 Missed sampling deadlines are skipped rather than replayed, because historical GPU activity cannot be reconstructed accurately.
 
 Temperature polling and other slow work piggyback on the main sampling loop rather than requiring additional worker threads or timers.
+
+## Runtime Configuration
+
+BlueMax accepts validated command-line options for the activity sampling and temperature polling intervals:
+
+```text
+-s N    --sample-interval-ms N
+-t N    --temperature-poll-interval-ms N
+-h      --help
+-V      --version
+```
+
+Options taking a value require that value as the next command-line argument. Attached values such as `-s20` and equals-sign forms such as `--sample-interval-ms=20` are not accepted.
+
+The supported intervals are:
+
+```text
+Activity sampling:
+    default: 10 ms
+    range:   1-1000 ms
+
+Temperature polling:
+    default: 1000 ms
+    range:   100-1000 ms
+```
+
+The temperature polling interval must be greater than or equal to the activity sampling interval because temperature polling piggybacks on the activity-sampling loop.
+
+The activity interval remains configurable so values such as 10, 20, 50, 100, and 1000 ms can be compared on the target hardware. The default remains 10 ms until hardware measurements justify changing it.
+
+Help and version options must be used alone. Help and version output exit successfully, while an invalid command line exits with status 2. The current version output is:
+
+```text
+BlueMax 0.1.0
+```
 
 ## Hardware Video Decode Testing
 
@@ -236,7 +273,7 @@ This is one of the primary reasons BlueMax explicitly monitors the hardware vide
 
 BlueMax is currently under development.
 
-Thermal telemetry, read-only GPU activity telemetry, Nouveau pstate control, and the pure governor policy module are implemented and covered by unit tests using synthetic files and inputs. The tests do not access the real GPU, `/sys`, or debugfs.
+Thermal telemetry, read-only GPU activity telemetry, Nouveau pstate control, the pure governor policy module, and validated runtime interval configuration are implemented and covered by unit tests using synthetic files and inputs. The tests do not access the real GPU, `/sys`, or debugfs.
 
 The daemon loop, runtime hardware integration, signal handling, console output, and systemd service are not yet implemented.
 
