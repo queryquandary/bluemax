@@ -9,26 +9,17 @@
 #include <string.h>
 
 #define CHECK(condition)                                                        \
-    do {                                                                        \
-        if (!(condition)) {                                                     \
-            fprintf(                                                            \
-                stderr,                                                         \
-                "FAIL %s:%d: %s\n",                                            \
-                __func__,                                                       \
-                __LINE__,                                                       \
-                #condition);                                                    \
+    do                                                                          \
+    {                                                                           \
+        if (!(condition))                                                       \
+        {                                                                       \
+            fprintf(stderr, "FAIL %s:%d: %s\n", __func__, __LINE__, #condition); \
             return -1;                                                          \
         }                                                                       \
     } while (0)
 
 /** Parse arguments while capturing any diagnostic text. */
-static int parse_with_diagnostics(
-    int argc,
-    char *const argv[],
-    struct runtime_config *config,
-    enum runtime_config_parse_result *result,
-    char *diagnostic,
-    size_t capacity)
+static int parse_with_diagnostics(int argc, char *const argv[], struct runtime_config *config, enum runtime_config_parse_result *result, char *diagnostic, size_t capacity)
 {
     FILE *stream = tmpfile();
     if (stream == NULL)
@@ -36,7 +27,7 @@ static int parse_with_diagnostics(
 
     *result = runtime_config_parse(argc, argv, config, stream);
 
-    if (fflush(stream) == EOF || fseek(stream, 0, SEEK_SET) == -1) 
+    if (fflush(stream) == EOF || fseek(stream, 0, SEEK_SET) == -1)
     {
         fclose(stream);
         return -1;
@@ -44,12 +35,12 @@ static int parse_with_diagnostics(
 
     size_t received = fread(diagnostic, 1, capacity - 1, stream);
 
-    if (ferror(stream)) 
+    if (ferror(stream))
     {
         fclose(stream);
         return -1;
     }
-    
+
     diagnostic[received] = '\0';
     return fclose(stream);
 }
@@ -125,7 +116,7 @@ static int test_rejects_invalid_values_transactionally(void)
         "999999999999999999999999999999999999",
     };
 
-    for (size_t index = 0; index < sizeof(values) / sizeof(values[0]); index++) 
+    for (size_t index = 0; index < sizeof(values) / sizeof(values[0]); index++)
     {
         char *argv[] = {"bluemax", "-s", (char *)values[index]};
         struct runtime_config config = {77, 777};
@@ -161,7 +152,7 @@ static int test_rejects_unsupported_value_forms(void)
         "--temperature-poll-interval-ms=1000",
     };
 
-    for (size_t index = 0; index < sizeof(arguments) / sizeof(arguments[0]); index++) 
+    for (size_t index = 0; index < sizeof(arguments) / sizeof(arguments[0]); index++)
     {
         char *argv[] = {"bluemax", (char *)arguments[index]};
         struct runtime_config config = {77, 777};
@@ -201,7 +192,7 @@ static int test_rejects_unrecognized_arguments(void)
 {
     static const char *arguments[] = {"--unknown", "unexpected", "-hV"};
 
-    for (size_t index = 0; index < sizeof(arguments) / sizeof(arguments[0]); index++) 
+    for (size_t index = 0; index < sizeof(arguments) / sizeof(arguments[0]); index++)
     {
         char *argv[] = {"bluemax", (char *)arguments[index]};
         struct runtime_config config = {77, 777};
@@ -313,7 +304,7 @@ int main(void)
 
     int failures = 0;
 
-    for (size_t index = 0; index < sizeof(tests) / sizeof(tests[0]); index++) 
+    for (size_t index = 0; index < sizeof(tests) / sizeof(tests[0]); index++)
     {
         if (tests[index].run() == 0)
             printf("PASS: %s\n", tests[index].name);
@@ -321,7 +312,7 @@ int main(void)
             failures++;
     }
 
-    if (failures != 0) 
+    if (failures != 0)
     {
         fprintf(stderr, "%d runtime configuration test(s) failed\n", failures);
         return 1;

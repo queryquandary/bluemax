@@ -42,7 +42,7 @@ static bool parse_interval(const char *text, unsigned int minimum, unsigned int 
 
     unsigned int parsed = 0;
 
-    for (const unsigned char *position = (const unsigned char *)text; *position != '\0'; position++) 
+    for (const unsigned char *position = (const unsigned char *)text; *position != '\0'; position++)
     {
         if (*position < '0' || *position > '9')
             return false;
@@ -71,33 +71,16 @@ static enum runtime_config_parse_result report_missing_value(FILE *stream, const
 }
 
 /** Report an invalid or out-of-range interval value. */
-static enum runtime_config_parse_result report_invalid_value(
-    FILE *stream,
-    const char *program_name,
-    const char *option,
-    const char *value,
-    unsigned int minimum,
-    unsigned int maximum)
+static enum runtime_config_parse_result report_invalid_value(FILE *stream, const char *program_name, const char *option, const char *value, unsigned int minimum, unsigned int maximum)
 {
-    fprintf(
-        stream,
-        "%s: invalid value '%s' for '%s'; expected a decimal integer from %u to %u\n",
-        program_name,
-        value,
-        option,
-        minimum,
-        maximum);
+    fprintf(stream, "%s: invalid value '%s' for '%s'; expected a decimal integer from %u to %u\n", program_name, value, option, minimum, maximum);
     print_help_hint(stream, program_name);
     return RUNTIME_CONFIG_PARSE_ERROR;
 }
 
-enum runtime_config_parse_result runtime_config_parse(
-    int argc,
-    char *const argv[],
-    struct runtime_config *config,
-    FILE *error_stream)
+enum runtime_config_parse_result runtime_config_parse(int argc, char *const argv[], struct runtime_config *config, FILE *error_stream)
 {
-    if (argc < 1 || argv == NULL || argv[0] == NULL || config == NULL || error_stream == NULL) 
+    if (argc < 1 || argv == NULL || argv[0] == NULL || config == NULL || error_stream == NULL)
     {
         errno = EINVAL;
         return RUNTIME_CONFIG_PARSE_ERROR;
@@ -107,7 +90,7 @@ enum runtime_config_parse_result runtime_config_parse(
 
     for (int index = 1; index < argc; index++)
     {
-        if (argv[index] == NULL) 
+        if (argv[index] == NULL)
         {
             errno = EINVAL;
             return RUNTIME_CONFIG_PARSE_ERROR;
@@ -115,8 +98,8 @@ enum runtime_config_parse_result runtime_config_parse(
 
         bool help = strcmp(argv[index], "-h") == 0 || strcmp(argv[index], "--help") == 0;
         bool version = strcmp(argv[index], "-V") == 0 || strcmp(argv[index], "--version") == 0;
-        
-        if (help || version) 
+
+        if (help || version)
         {
             if (argc != 2)
                 return report_exclusive_option_error(error_stream, program_name, argv[index]);
@@ -134,13 +117,13 @@ enum runtime_config_parse_result runtime_config_parse(
     bool sample_seen = false;
     bool temperature_seen = false;
 
-    for (int index = 1; index < argc; index++) 
+    for (int index = 1; index < argc; index++)
     {
         const char *option = argv[index];
         bool sample = strcmp(option, "-s") == 0 || strcmp(option, "--sample-interval-ms") == 0;
         bool temperature = strcmp(option, "-t") == 0 || strcmp(option, "--temperature-poll-interval-ms") == 0;
 
-        if (!sample && !temperature) 
+        if (!sample && !temperature)
         {
             const char *description = option[0] == '-' ? "unrecognized option" : "unexpected argument";
             return report_argument_error(error_stream, program_name, description, option);
@@ -148,7 +131,7 @@ enum runtime_config_parse_result runtime_config_parse(
 
         bool *seen = sample ? &sample_seen : &temperature_seen;
 
-        if (*seen) 
+        if (*seen)
             return report_argument_error(error_stream, program_name, "duplicate option", option);
 
         *seen = true;
@@ -174,12 +157,9 @@ enum runtime_config_parse_result runtime_config_parse(
             return report_invalid_value(error_stream, program_name, option, value, minimum, maximum);
     }
 
-    if (candidate.temperature_poll_interval_ms < candidate.sample_interval_ms) 
+    if (candidate.temperature_poll_interval_ms < candidate.sample_interval_ms)
     {
-        fprintf(
-            error_stream,
-            "%s: temperature polling interval must be greater than or equal to the activity sampling interval\n",
-            program_name);
+        fprintf(error_stream, "%s: temperature polling interval must be greater than or equal to the activity sampling interval\n", program_name);
         print_help_hint(error_stream, program_name);
         return RUNTIME_CONFIG_PARSE_ERROR;
     }
@@ -190,29 +170,18 @@ enum runtime_config_parse_result runtime_config_parse(
 
 void runtime_config_print_help(FILE *stream, const char *program_name)
 {
-    fprintf(
-        stream,
-        "Usage: %s [OPTIONS]\n"
-        "\n"
-        "Options:\n"
-        "  -s N, --sample-interval-ms N\n"
-        "      Activity sampling interval in milliseconds (default %d, range %d-%d).\n"
-        "  -t N, --temperature-poll-interval-ms N\n"
-        "      Temperature polling interval in milliseconds (default %d, range %d-%d).\n"
-        "  -h, --help\n"
-        "      Display this help and exit.\n"
-        "  -V, --version\n"
-        "      Display version information and exit.\n"
-        "\n"
-        "Workload triggers are sample-based; increasing the activity sampling\n"
-        "interval increases workload-trigger latency proportionally.\n",
-        program_name,
-        RUNTIME_CONFIG_DEFAULT_SAMPLE_INTERVAL_MS,
-        RUNTIME_CONFIG_MIN_SAMPLE_INTERVAL_MS,
-        RUNTIME_CONFIG_MAX_SAMPLE_INTERVAL_MS,
-        RUNTIME_CONFIG_DEFAULT_TEMPERATURE_POLL_INTERVAL_MS,
-        RUNTIME_CONFIG_MIN_TEMPERATURE_POLL_INTERVAL_MS,
-        RUNTIME_CONFIG_MAX_TEMPERATURE_POLL_INTERVAL_MS);
+    fprintf(stream, "Usage: %s [OPTIONS]\n", program_name);
+    fputs("\nOptions:\n", stream);
+    fputs("  -s N, --sample-interval-ms N\n", stream);
+    fprintf(stream, "      Activity sampling interval in milliseconds (default %d, range %d-%d).\n", RUNTIME_CONFIG_DEFAULT_SAMPLE_INTERVAL_MS, RUNTIME_CONFIG_MIN_SAMPLE_INTERVAL_MS, RUNTIME_CONFIG_MAX_SAMPLE_INTERVAL_MS);
+    fputs("  -t N, --temperature-poll-interval-ms N\n", stream);
+    fprintf(stream, "      Temperature polling interval in milliseconds (default %d, range %d-%d).\n", RUNTIME_CONFIG_DEFAULT_TEMPERATURE_POLL_INTERVAL_MS, RUNTIME_CONFIG_MIN_TEMPERATURE_POLL_INTERVAL_MS, RUNTIME_CONFIG_MAX_TEMPERATURE_POLL_INTERVAL_MS);
+    fputs("  -h, --help\n", stream);
+    fputs("      Display this help and exit.\n", stream);
+    fputs("  -V, --version\n", stream);
+    fputs("      Display version information and exit.\n", stream);
+    fputs("\nWorkload triggers are sample-based; increasing the activity sampling\n", stream);
+    fputs("interval increases workload-trigger latency proportionally.\n", stream);
 }
 
 void runtime_config_print_version(FILE *stream)
