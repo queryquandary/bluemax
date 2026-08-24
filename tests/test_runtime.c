@@ -169,6 +169,11 @@ static int test_initializes_and_cleans_up_runtime(void)
     CHECK(context.policy.last_activity_ms >= earliest_ms);
     CHECK(context.policy.last_activity_ms <= latest_ms);
     CHECK(context.policy.high_since_ms == context.policy.last_activity_ms);
+
+    // Policy and scheduling startup share one timestamp. Temperature waits a
+    // full configured interval because discovery already supplied a valid read.
+    CHECK(context.schedule.next_sample_deadline_ms == context.policy.last_activity_ms);
+    CHECK(context.schedule.next_temperature_poll_deadline_ms == context.policy.last_activity_ms + 500);
     CHECK(context.gpu.bar0_address != NULL);
     CHECK(context.gpu.bar0_length == (size_t)MOCK_BAR0_LENGTH);
 

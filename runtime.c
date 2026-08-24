@@ -88,6 +88,11 @@ enum runtime_startup_result runtime_start(struct governor_context *context, cons
             now_ms) == -1)
         return rollback_mapping(&candidate, RUNTIME_STARTUP_POLICY_ERROR);
 
+    // Share the policy's startup timestamp so its initial state and the first
+    // activity deadline describe the same point in the monotonic timeline.
+    if (sampling_schedule_init(&candidate.schedule, &candidate.config, now_ms) == -1)
+        return rollback_mapping(&candidate, RUNTIME_STARTUP_SCHEDULE_ERROR);
+
     *context = candidate;
     return RUNTIME_STARTUP_OK;
 }
@@ -116,6 +121,9 @@ const char *runtime_startup_result_description(enum runtime_startup_result resul
 
         case RUNTIME_STARTUP_POLICY_ERROR:
             return "cannot initialize governor policy";
+
+        case RUNTIME_STARTUP_SCHEDULE_ERROR:
+            return "cannot initialize sampling schedule";
     }
 
     return "unknown runtime startup error";

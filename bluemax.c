@@ -68,24 +68,50 @@ int main(int argc, char *argv[])
     }
     else
     {
-        // Startup already supplied a valid temperature, so this one-shot cycle
-        // samples activity without performing an immediate duplicate poll.
-        enum runtime_cycle_status cycle_status = runtime_run_cycle(&context, &system_paths, false, now_ms, &cycle);
+        bool poll_temperature;
 
-        // Console output may change errno. Retain the cycle error before
-        // printing its structured observations and decision.
-        int cycle_error = errno;
-        runtime_print_cycle_summary(stdout, &cycle);
-
-        if (cycle_status == RUNTIME_CYCLE_PSTATE_ERROR)
+        // The independent temperature timeline decides whether this activity
+        // cycle should include the slower hwmon read.
+        if (sampling_schedule_prepare(&context.schedule, now_ms, &poll_temperature) == -1)
         {
-            fprintf(stderr, "%s: cannot apply recommended GPU pstate: %s\n", argv[0], strerror(cycle_error));
+            fprintf(stderr, "%s: cannot prepare sampling schedule: %s\n", argv[0], strerror(errno));
             exit_status = EXIT_FAILURE;
         }
-        else if (cycle_status != RUNTIME_CYCLE_OK)
+        else
         {
-            fprintf(stderr, "%s: cannot execute governor cycle: %s\n", argv[0], strerror(cycle_error));
-            exit_status = EXIT_FAILURE;
+            enum runtime_cycle_status cycle_status = runtime_run_cycle(&context, &system_paths, poll_temperature, now_ms, &cycle);
+
+            // Preserve independent cycle and scheduling errors across console
+            // output so diagnostics retain their original causes.
+            int cycle_error = errno;
+            int schedule_error = 0;
+            uint64_t completed_ms;
+
+            // Advance from time measured after MMIO, temperature, policy, and
+            // pstate work. A slow cycle therefore skips deadlines consumed
+            // while that work was running instead of replaying them.
+            if (runtime_monotonic_time_ms(&completed_ms) == -1)
+                schedule_error = errno;
+            else if (sampling_schedule_complete(&context.schedule, &context.config, completed_ms, poll_temperature) == -1)
+                schedule_error = errno;
+
+            runtime_print_cycle_summary(stdout, &cycle);
+
+            if (cycle_status == RUNTIME_CYCLE_PSTATE_ERROR)
+            {
+                fprintf(stderr, "%s: cannot apply recommended GPU pstate: %s\n", argv[0], strerror(cycle_error));
+                exit_status = EXIT_FAILURE;
+            }
+            else if (cycle_status != RUNTIME_CYCLE_OK)
+            {
+                fprintf(stderr, "%s: cannot execute governor cycle: %s\n", argv[0], strerror(cycle_error));
+                exit_status = EXIT_FAILURE;
+            }
+            else if (schedule_error != 0)
+            {
+                fprintf(stderr, "%s: cannot advance sampling schedule: %s\n", argv[0], strerror(schedule_error));
+                exit_status = EXIT_FAILURE;
+            }
         }
     }
 

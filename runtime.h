@@ -5,6 +5,7 @@
 #include "gpu_mmio.h"
 #include "gpu_pstate.h"
 #include "runtime_config.h"
+#include "sampling_schedule.h"
 #include "thermal.h"
 
 #include <stdbool.h>
@@ -40,6 +41,9 @@ struct governor_context {
     /** Workload and thermal policy state. */
     struct governor_policy policy;
 
+    /** Absolute activity-sampling and temperature-poll deadlines. */
+    struct sampling_schedule schedule;
+
     /** Read-only GPU BAR0 mapping and resolved activity registers. */
     struct gpu_mmio gpu;
 };
@@ -52,7 +56,8 @@ enum runtime_startup_result {
     RUNTIME_STARTUP_PSTATE_ERROR,
     RUNTIME_STARTUP_MMIO_ERROR,
     RUNTIME_STARTUP_CLOCK_ERROR,
-    RUNTIME_STARTUP_POLICY_ERROR
+    RUNTIME_STARTUP_POLICY_ERROR,
+    RUNTIME_STARTUP_SCHEDULE_ERROR
 };
 
 /** @brief Result category for one runtime governor cycle. */
