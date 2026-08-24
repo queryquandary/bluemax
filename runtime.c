@@ -1,6 +1,6 @@
 /**
  * @file runtime.c
- * @brief BlueMax hardware and policy startup lifecycle.
+ * @brief BlueMax hardware, policy, and sampling-cycle lifecycle.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -10,15 +10,23 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
-/** Read the current monotonic time and convert it to whole milliseconds. */
-static int read_monotonic_time_ms(uint64_t *now_ms)
+int runtime_monotonic_time_ms(uint64_t *now_ms)
 {
+    if (now_ms == NULL)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now) == -1)
         return -1;
 
+    // Guard the multiplication as well as the sub-second addition so the
+    // conversion remains valid if time_t has a wider range than uint64_t.
     if (now.tv_sec < 0 || (uint64_t)now.tv_sec > (UINT64_MAX - 999U) / 1000U)
     {
         errno = EOVERFLOW;
@@ -51,6 +59,8 @@ enum runtime_startup_result runtime_start(struct governor_context *context, cons
         return RUNTIME_STARTUP_INVALID_ARGUMENT;
     }
 
+    // Build startup state privately so callers never receive a context that
+    // owns only some of the required hardware resources.
     struct governor_context candidate = {
         .config = *config,
     };
@@ -65,8 +75,8 @@ enum runtime_startup_result runtime_start(struct governor_context *context, cons
         return RUNTIME_STARTUP_MMIO_ERROR;
 
     uint64_t now_ms;
-    
-    if (read_monotonic_time_ms(&now_ms) == -1)
+
+    if (runtime_monotonic_time_ms(&now_ms) == -1)
         return rollback_mapping(&candidate, RUNTIME_STARTUP_CLOCK_ERROR);
 
     if (governor_policy_init(
@@ -144,6 +154,118 @@ void runtime_print_startup_summary(FILE *stream, const struct governor_context *
     fprintf(stream, "Policy target:             %s\n", pstate_name(context->policy.target_pstate));
     fprintf(stream, "Thermal limit:             %s\n", context->policy.thermal_limit_active ? "active" : "inactive");
     fprintf(stream, "BAR0 telemetry:            mapped read-only (%zu MiB)\n\n", context->gpu.bar0_length / (1024U * 1024U));
+}
+
+enum runtime_cycle_status runtime_run_cycle(struct governor_context *context, const struct runtime_paths *paths, bool poll_temperature, uint64_t now_ms, struct runtime_cycle_result *result)
+{
+    if (context == NULL || paths == NULL || paths->pstate_path == NULL || result == NULL)
+    {
+        errno = EINVAL;
+        return RUNTIME_CYCLE_INVALID_ARGUMENT;
+    }
+
+    struct runtime_cycle_result cycle = {0};
+
+    // Capture all four registers before doing slower filesystem work so they
+    // describe one closely grouped activity observation.
+    gpu_mmio_read_activity(&context->gpu, &cycle.activity);
+
+    cycle.graphics_activity_detected = cycle.activity.pgraph != 0;
+    cycle.video_activity_detected = cycle.activity.pvld != 0
+        || cycle.activity.ppdec != 0
+        || cycle.activity.pppp != 0;
+
+    if (poll_temperature)
+    {
+        int temperature_millidegrees;
+        if (thermal_sensor_read(&context->thermal, &temperature_millidegrees) == -1)
+        {
+            // Telemetry loss is policy input rather than an immediate runtime
+            // failure. Keep the last valid value for reporting and recovery.
+            cycle.temperature_observation = GOVERNOR_TEMPERATURE_READ_FAILED;
+            cycle.temperature_read_error = errno;
+        }
+        else
+        {
+            context->temperature_millidegrees = temperature_millidegrees;
+            cycle.temperature_observation = GOVERNOR_TEMPERATURE_VALID;
+        }
+    }
+    else
+    {
+        cycle.temperature_observation = GOVERNOR_TEMPERATURE_NOT_POLLED;
+    }
+
+    cycle.temperature_millidegrees = context->temperature_millidegrees;
+
+    const struct governor_policy_input input = {
+        .now_ms = now_ms,
+        .graphics_activity_detected = cycle.graphics_activity_detected,
+        .video_activity_detected = cycle.video_activity_detected,
+        .temperature_observation = cycle.temperature_observation,
+        .temperature_millidegrees = context->temperature_millidegrees,
+    };
+
+    // The policy advances even if hardware actuation later fails. Because the
+    // retained applied state changes only on success, a later cycle will retry
+    // any recommendation that the GPU did not accept.
+    cycle.policy = governor_policy_step(&context->policy, &input);
+    cycle.pstate_transition_requested = cycle.policy.recommended_pstate != context->applied_pstate;
+
+    if (cycle.pstate_transition_requested)
+    {
+        if (gpu_pstate_set(paths->pstate_path, cycle.policy.recommended_pstate) == -1)
+        {
+            // Publish the observations and decision on failure so callers can
+            // explain what was attempted without claiming that it was applied.
+            int transition_error = errno;
+            cycle.applied_pstate = context->applied_pstate;
+            *result = cycle;
+            errno = transition_error;
+            return RUNTIME_CYCLE_PSTATE_ERROR;
+        }
+
+        context->applied_pstate = cycle.policy.recommended_pstate;
+        cycle.pstate_transition_succeeded = true;
+    }
+
+    cycle.applied_pstate = context->applied_pstate;
+    *result = cycle;
+    return RUNTIME_CYCLE_OK;
+}
+
+void runtime_print_cycle_summary(FILE *stream, const struct runtime_cycle_result *result)
+{
+    fprintf(stream, "Governor cycle\n\n");
+    fprintf(stream, "PGRAPH:                    0x%08x\n", (unsigned int)result->activity.pgraph);
+    fprintf(stream, "PVLD:                      0x%08x\n", (unsigned int)result->activity.pvld);
+    fprintf(stream, "PPDEC:                     0x%08x\n", (unsigned int)result->activity.ppdec);
+    fprintf(stream, "PPPP:                      0x%08x\n", (unsigned int)result->activity.pppp);
+    fprintf(stream, "Graphics activity:         %s\n", result->graphics_activity_detected ? "active" : "idle");
+    fprintf(stream, "Video activity:            %s\n", result->video_activity_detected ? "active" : "idle");
+
+    if (result->temperature_observation == GOVERNOR_TEMPERATURE_NOT_POLLED)
+        fprintf(stream, "Temperature observation:   not polled\n");
+    else if (result->temperature_observation == GOVERNOR_TEMPERATURE_VALID)
+        fprintf(stream, "Temperature observation:   valid\n");
+    else
+        fprintf(stream, "Temperature observation:   read failed (%s)\n", strerror(result->temperature_read_error));
+
+    fprintf(stream, "Retained temperature:      %6.1f C\n", result->temperature_millidegrees / 1000.0);
+    fprintf(stream, "Policy recommendation:     %s\n", pstate_name(result->policy.recommended_pstate));
+
+    // Keep the complete bitmask visible during one-shot hardware validation;
+    // later event reporting can translate individual flags into messages.
+    fprintf(stream, "Policy events:             0x%02x\n", result->policy.events);
+
+    if (!result->pstate_transition_requested)
+        fprintf(stream, "Pstate transition:         not required\n");
+    else if (result->pstate_transition_succeeded)
+        fprintf(stream, "Pstate transition:         succeeded\n");
+    else
+        fprintf(stream, "Pstate transition:         failed\n");
+
+    fprintf(stream, "Applied pstate:            %s\n\n", pstate_name(result->applied_pstate));
 }
 
 int runtime_cleanup(struct governor_context *context)
