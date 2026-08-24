@@ -16,6 +16,101 @@
 #include <string.h>
 #include <unistd.h>
 
+/** @brief Fixed clocks reported for one listed or currently active pstate. */
+struct gpu_pstate_clocks {
+    int core_mhz;
+    int shader_mhz;
+    int memory_mhz;
+};
+
+/** Parse the three fixed clocks used by the target Nouveau pstate format. */
+static int parse_pstate_clocks(const char *description, struct gpu_pstate_clocks *clocks)
+{
+    struct gpu_pstate_clocks parsed;
+    int consumed = -1;
+
+    if (sscanf(
+            description,
+            " core %d MHz shader %d MHz memory %d MHz %n",
+            &parsed.core_mhz,
+            &parsed.shader_mhz,
+            &parsed.memory_mhz,
+            &consumed) != 3
+        || consumed < 0
+        || parsed.core_mhz <= 0
+        || parsed.shader_mhz <= 0
+        || parsed.memory_mhz <= 0)
+        return 0;
+
+    const char *remainder = description + consumed;
+    if (*remainder == '*')
+        remainder++;
+
+    while (isspace((unsigned char)*remainder))
+        remainder++;
+
+    if (*remainder != '\0')
+        return 0;
+
+    *clocks = parsed;
+    return 1;
+}
+
+/** Parse a supported two-character state label at the start of a line. */
+static int parse_supported_state_label(const char *position, enum gpu_pstate *pstate)
+{
+    if (strlen(position) < 3 || position[0] != '0' || position[2] != ':')
+        return 0;
+
+    if (position[1] == '3')
+        *pstate = GPU_PSTATE_LOW;
+    else if (position[1] == '7')
+        *pstate = GPU_PSTATE_MEDIUM;
+    else if (position[1] == 'f' || position[1] == 'F')
+        *pstate = GPU_PSTATE_HIGH;
+    else
+        return 0;
+
+    return 1;
+}
+
+/** Parse fixed clocks from a supported state listing. */
+static int parse_listed_state(const char *line, enum gpu_pstate *pstate, struct gpu_pstate_clocks *clocks)
+{
+    const char *position = line;
+    while (isspace((unsigned char)*position))
+        position++;
+
+    if (!parse_supported_state_label(position, pstate))
+        return 0;
+
+    return parse_pstate_clocks(position + 3, clocks);
+}
+
+/** Parse the fixed clocks from Nouveau's current-state AC line. */
+static int parse_current_clocks(const char *line, struct gpu_pstate_clocks *clocks)
+{
+    const char *position = line;
+    while (isspace((unsigned char)*position))
+        position++;
+
+    if (strlen(position) < 3
+        || (position[0] != 'A' && position[0] != 'a')
+        || (position[1] != 'C' && position[1] != 'c')
+        || position[2] != ':')
+        return 0;
+
+    return parse_pstate_clocks(position + 3, clocks);
+}
+
+/** Return whether two pstate clock tuples are identical. */
+static bool pstate_clocks_equal(const struct gpu_pstate_clocks *left, const struct gpu_pstate_clocks *right)
+{
+    return left->core_mhz == right->core_mhz
+        && left->shader_mhz == right->shader_mhz
+        && left->memory_mhz == right->memory_mhz;
+}
+
 /**
  * @brief Check one line from Nouveau's list of performance states.
  *
@@ -55,25 +150,16 @@ static int parse_active_state(const char *line, enum gpu_pstate *pstate)
         return -1;
     }
 
+    // Some Nouveau versions mark only the AC line. Its clocks are matched to
+    // the supported state listings after the complete file has been read.
+    if ((position[0] == 'A' || position[0] == 'a')
+        && (position[1] == 'C' || position[1] == 'c'))
+        return 0;
+
     // Translate Nouveau's labels into names the rest of BlueMax can use
     // without needing to know the text format of the pstate file.
-    if (position[0] == '0') 
-    {
-        if (position[1] == '3') {
-            *pstate = GPU_PSTATE_LOW;
-            return 1;
-        }
-
-        if (position[1] == '7') {
-            *pstate = GPU_PSTATE_MEDIUM;
-            return 1;
-        }
-
-        if (position[1] == 'f' || position[1] == 'F') {
-            *pstate = GPU_PSTATE_HIGH;
-            return 1;
-        }
-    }
+    if (parse_supported_state_label(position, pstate))
+        return 1;
 
     // An asterisk was present, but it identified a state this version of BlueMax
     // does not support. Report that instead of choosing a substitute state.
@@ -114,13 +200,31 @@ int gpu_pstate_read(const char *pstate_path, enum gpu_pstate *pstate)
     size_t capacity = 0;
     bool active_state_found = false;
     enum gpu_pstate active_state = GPU_PSTATE_LOW;
+    struct gpu_pstate_clocks listed_clocks[GPU_PSTATE_HIGH + 1] = {0};
+    bool listed_state_found[GPU_PSTATE_HIGH + 1] = {false};
+    struct gpu_pstate_clocks current_clocks = {0};
+    bool current_clocks_found = false;
     int result = 0;
 
     // Each line describes an available performance state. Nouveau puts an
     // asterisk beside the state currently in use, so inspect every line to find
     // it.
     while (getline(&line, &capacity, stream) != -1) {
-        
+        enum gpu_pstate listed_state;
+        struct gpu_pstate_clocks clocks;
+
+        if (parse_listed_state(line, &listed_state, &clocks))
+        {
+            listed_clocks[listed_state] = clocks;
+            listed_state_found[listed_state] = true;
+        }
+
+        if (parse_current_clocks(line, &clocks))
+        {
+            current_clocks = clocks;
+            current_clocks_found = true;
+        }
+
         enum gpu_pstate parsed_state;
 
         int parsed = parse_active_state(line, &parsed_state);
@@ -156,9 +260,26 @@ int gpu_pstate_read(const char *pstate_path, enum gpu_pstate *pstate)
         result = -1;
     }
 
-    // Without an asterisk, BlueMax cannot know which state is active.
-    if (result == 0 && !active_state_found) {
-        
+    // Older Nouveau versions omit the marker and report only the current AC
+    // clocks. Match that tuple to exactly one supported state listing.
+    if (result == 0 && !active_state_found && current_clocks_found)
+    {
+        unsigned int matches = 0;
+
+        for (enum gpu_pstate state = GPU_PSTATE_LOW; state <= GPU_PSTATE_HIGH; state++)
+        {
+            if (listed_state_found[state] && pstate_clocks_equal(&listed_clocks[state], &current_clocks))
+            {
+                active_state = state;
+                matches++;
+            }
+        }
+
+        active_state_found = matches == 1;
+    }
+
+    if (result == 0 && !active_state_found)
+    {
         errno = ENODATA;
         result = -1;
     }

@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <time.h>
 
 /** Read the current monotonic time and convert it to whole milliseconds. */
@@ -54,9 +55,7 @@ enum runtime_startup_result runtime_start(struct governor_context *context, cons
         .config = *config,
     };
 
-    int initial_temperature_millidegrees;
-
-    if (thermal_sensor_discover(paths->hwmon_root, &candidate.thermal, &initial_temperature_millidegrees) == -1)
+    if (thermal_sensor_discover(paths->hwmon_root, &candidate.thermal, &candidate.temperature_millidegrees) == -1)
         return RUNTIME_STARTUP_THERMAL_ERROR;
 
     if (gpu_pstate_read(paths->pstate_path, &candidate.applied_pstate) == -1)
@@ -75,7 +74,7 @@ enum runtime_startup_result runtime_start(struct governor_context *context, cons
             candidate.applied_pstate,
             candidate.thermal.max_millidegrees,
             candidate.thermal.max_hyst_millidegrees,
-            initial_temperature_millidegrees,
+            candidate.temperature_millidegrees,
             now_ms) == -1)
         return rollback_mapping(&candidate, RUNTIME_STARTUP_POLICY_ERROR);
 
@@ -110,6 +109,41 @@ const char *runtime_startup_result_description(enum runtime_startup_result resul
     }
 
     return "unknown runtime startup error";
+}
+
+/** Return the display name for a valid GPU pstate. */
+static const char *pstate_name(enum gpu_pstate pstate)
+{
+    switch (pstate)
+    {
+        case GPU_PSTATE_LOW:
+            return "LOW (03)";
+
+        case GPU_PSTATE_MEDIUM:
+            return "MEDIUM (07)";
+
+        case GPU_PSTATE_HIGH:
+            return "HIGH (0f)";
+    }
+
+    return "UNKNOWN";
+}
+
+void runtime_print_startup_summary(FILE *stream, const struct governor_context *context)
+{
+    int recovery_millidegrees = context->thermal.max_millidegrees - context->thermal.max_hyst_millidegrees;
+
+    fprintf(stream, "BlueMax %s startup\n\n", BLUEMAX_VERSION);
+    fprintf(stream, "Activity sample interval:   %6u ms\n", context->config.sample_interval_ms);
+    fprintf(stream, "Temperature poll interval: %6u ms\n", context->config.temperature_poll_interval_ms);
+    fprintf(stream, "Thermal sensor:            %s\n", context->thermal.input_path);
+    fprintf(stream, "Initial temperature:       %6.1f C\n", context->temperature_millidegrees / 1000.0);
+    fprintf(stream, "Maximum temperature:       %6.1f C\n", context->thermal.max_millidegrees / 1000.0);
+    fprintf(stream, "Recovery threshold:        below %.1f C\n", recovery_millidegrees / 1000.0);
+    fprintf(stream, "Applied pstate:            %s\n", pstate_name(context->applied_pstate));
+    fprintf(stream, "Policy target:             %s\n", pstate_name(context->policy.target_pstate));
+    fprintf(stream, "Thermal limit:             %s\n", context->policy.thermal_limit_active ? "active" : "inactive");
+    fprintf(stream, "BAR0 telemetry:            mapped read-only (%zu MiB)\n\n", context->gpu.bar0_length / (1024U * 1024U));
 }
 
 int runtime_cleanup(struct governor_context *context)

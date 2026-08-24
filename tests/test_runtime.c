@@ -143,6 +143,7 @@ static int test_initializes_and_cleans_up_runtime(void)
     CHECK(context.applied_pstate == GPU_PSTATE_LOW);
     CHECK(context.thermal.max_millidegrees == 95000);
     CHECK(context.thermal.max_hyst_millidegrees == 3000);
+    CHECK(context.temperature_millidegrees == 51000);
     CHECK(context.policy.target_pstate == GPU_PSTATE_LOW);
     CHECK(context.policy.temperature_max_millidegrees == 95000);
     CHECK(context.policy.temperature_hysteresis_millidegrees == 3000);
@@ -169,6 +170,57 @@ static int test_initializes_and_cleans_up_runtime(void)
     CHECK(runtime_cleanup(&context) == 0);
 
 cleanup:
+    if (context.gpu.bar0_address != NULL)
+        runtime_cleanup(&context);
+
+    fixture_destroy(&fixture);
+    return result;
+}
+
+/** Capture and verify the one-time console summary of initialized state. */
+static int test_prints_startup_summary(void)
+{
+    struct runtime_fixture fixture;
+    if (fixture_create(&fixture) == -1)
+    {
+        perror("fixture_create");
+        return -1;
+    }
+
+    int result = 0;
+    struct runtime_config config = {10, 1000};
+    struct governor_context context = {0};
+    FILE *stream = NULL;
+    char summary[2048];
+
+    CHECK(runtime_start(&context, &config, &fixture.paths) == RUNTIME_STARTUP_OK);
+    stream = tmpfile();
+    CHECK(stream != NULL);
+
+    runtime_print_startup_summary(stream, &context);
+    CHECK(fflush(stream) == 0);
+    CHECK(fseek(stream, 0, SEEK_SET) == 0);
+
+    size_t received = fread(summary, 1, sizeof(summary) - 1, stream);
+    CHECK(!ferror(stream));
+    summary[received] = '\0';
+
+    CHECK(strstr(summary, "BlueMax 0.1.0 startup") != NULL);
+    CHECK(strstr(summary, "Activity sample interval:       10 ms") != NULL);
+    CHECK(strstr(summary, "Temperature poll interval:   1000 ms") != NULL);
+    CHECK(strstr(summary, context.thermal.input_path) != NULL);
+    CHECK(strstr(summary, "Initial temperature:         51.0 C") != NULL);
+    CHECK(strstr(summary, "Maximum temperature:         95.0 C") != NULL);
+    CHECK(strstr(summary, "Recovery threshold:        below 92.0 C") != NULL);
+    CHECK(strstr(summary, "Applied pstate:            LOW (03)") != NULL);
+    CHECK(strstr(summary, "Policy target:             LOW (03)") != NULL);
+    CHECK(strstr(summary, "Thermal limit:             inactive") != NULL);
+    CHECK(strstr(summary, "BAR0 telemetry:            mapped read-only (16 MiB)") != NULL);
+
+cleanup:
+    if (stream != NULL)
+        fclose(stream);
+
     if (context.gpu.bar0_address != NULL)
         runtime_cleanup(&context);
 
@@ -331,6 +383,7 @@ int main(void)
         int (*run)(void);
     } tests[] = {
         {"initializes and cleans up runtime", test_initializes_and_cleans_up_runtime},
+        {"prints startup summary", test_prints_startup_summary},
         {"initializes supported pstates", test_initializes_supported_pstates},
         {"applies startup thermal limit", test_initial_temperature_applies_thermal_limit},
         {"reports hardware failures transactionally", test_reports_hardware_failures_transactionally},

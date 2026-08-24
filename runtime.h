@@ -7,6 +7,8 @@
 #include "runtime_config.h"
 #include "thermal.h"
 
+#include <stdio.h>
+
 /** @brief System paths used to initialize the BlueMax runtime. */
 struct runtime_paths {
     /** Root directory containing Linux hwmon devices. */
@@ -26,6 +28,9 @@ struct governor_context {
 
     /** Discovered thermal sensor retained for fresh temperature reads. */
     struct thermal_sensor thermal;
+
+    /** Most recent valid temperature, initialized during sensor discovery. */
+    int temperature_millidegrees;
 
     /** Last performance state successfully read from or applied to the GPU. */
     enum gpu_pstate applied_pstate;
@@ -72,6 +77,14 @@ enum runtime_startup_result runtime_start(struct governor_context *context, cons
  * @return Static text suitable for an error diagnostic.
  */
 const char *runtime_startup_result_description(enum runtime_startup_result result);
+
+/**
+ * @brief Print the hardware and policy state discovered during startup.
+ *
+ * @param[in] stream Destination for the startup summary.
+ * @param[in] context Successfully initialized runtime context.
+ */
+void runtime_print_startup_summary(FILE *stream, const struct governor_context *context);
 
 /**
  * @brief Release resources retained by a runtime context.

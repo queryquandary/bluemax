@@ -54,11 +54,14 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    runtime_print_startup_summary(stdout, &context);
+
     if (runtime_cleanup(&context) == -1)
     {
         fprintf(stderr, "%s: cannot unmap GPU BAR0 resource: %s\n", argv[0], strerror(errno));
         return EXIT_FAILURE;
     }
 
+    fputs("BAR0 telemetry unmapped\nBlueMax shutdown complete\n", stdout);
     return EXIT_SUCCESS;
 }

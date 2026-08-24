@@ -137,6 +137,60 @@ cleanup:
 }
 
 /**
+ * @brief Verify active-state discovery from Nouveau's unmarked AC clocks.
+ *
+ * @return 0 when every clock tuple selects its matching state, or -1 on
+ *         failure.
+ */
+static int test_matches_unmarked_current_clocks(void)
+{
+    static const struct {
+        const char *listing;
+        enum gpu_pstate expected;
+    } cases[] = {
+        {
+            "03: core 135 MHz shader 270 MHz memory 135 MHz\n"
+            "07: core 405 MHz shader 810 MHz memory 324 MHz\n"
+            "0f: core 550 MHz shader 1210 MHz memory 790 MHz\n"
+            "AC: core 135 MHz shader 270 MHz memory 135 MHz\n",
+            GPU_PSTATE_LOW,
+        },
+        {
+            "03: core 135 MHz shader 270 MHz memory 135 MHz\n"
+            "07: core 405 MHz shader 810 MHz memory 324 MHz\n"
+            "0f: core 550 MHz shader 1210 MHz memory 790 MHz\n"
+            "AC: core 405 MHz shader 810 MHz memory 324 MHz\n",
+            GPU_PSTATE_MEDIUM,
+        },
+        {
+            "03: core 135 MHz shader 270 MHz memory 135 MHz\n"
+            "07: core 405 MHz shader 810 MHz memory 324 MHz\n"
+            "0f: core 550 MHz shader 1210 MHz memory 790 MHz\n"
+            "AC: core 550 MHz shader 1210 MHz memory 790 MHz *\n",
+            GPU_PSTATE_HIGH,
+        },
+    };
+
+    struct gpu_pstate_fixture fixture;
+    if (fixture_create(&fixture) == -1) {
+        perror("fixture_create");
+        return -1;
+    }
+
+    int result = 0;
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        enum gpu_pstate observed = GPU_PSTATE_HIGH;
+        CHECK(test_write_text(fixture.root, "pstate", cases[index].listing) == 0);
+        CHECK(gpu_pstate_read(fixture.pstate_path, &observed) == 0);
+        CHECK(observed == cases[index].expected);
+    }
+
+cleanup:
+    fixture_destroy(&fixture);
+    return result;
+}
+
+/**
  * @brief Verify that invalid listings fail without changing the output value.
  *
  * @return 0 when every case passes, or -1 when a check fails.
@@ -154,6 +208,20 @@ static int test_rejects_invalid_listings(void)
         {"not-a-state *\n", EINVAL},
         {"0e: core 500 MHz *\n", EOPNOTSUPP},
         {"03: core 135 MHz *\n0f: core 550 MHz *\n", EINVAL},
+        {
+            "03: core 135 MHz shader 270 MHz memory 135 MHz\n"
+            "07: core 405 MHz shader 810 MHz memory 324 MHz\n"
+            "0f: core 550 MHz shader 1210 MHz memory 790 MHz\n"
+            "AC: core 999 MHz shader 999 MHz memory 999 MHz\n",
+            ENODATA,
+        },
+        {
+            "03: core 135 MHz shader 270 MHz memory 135 MHz\n"
+            "07: core 135 MHz shader 270 MHz memory 135 MHz\n"
+            "0f: core 550 MHz shader 1210 MHz memory 790 MHz\n"
+            "AC: core 135 MHz shader 270 MHz memory 135 MHz\n",
+            ENODATA,
+        },
     };
 
     struct gpu_pstate_fixture fixture;
@@ -291,6 +359,7 @@ int main(void)
         int (*run)(void);
     } tests[] = {
         {"reads supported active states", test_reads_supported_states},
+        {"matches unmarked current clocks", test_matches_unmarked_current_clocks},
         {"rejects invalid listings", test_rejects_invalid_listings},
         {"writes selectable states", test_writes_selectable_states},
         {"rejects unsupported selections", test_rejects_unsupported_selections},
