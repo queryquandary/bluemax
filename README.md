@@ -273,9 +273,9 @@ This is one of the primary reasons BlueMax explicitly monitors the hardware vide
 
 BlueMax is currently under development.
 
-Thermal telemetry, read-only GPU activity telemetry, Nouveau pstate control, the pure governor policy module, validated runtime interval configuration, and transactional runtime hardware initialization and cleanup are implemented and covered by unit tests using synthetic files and inputs. The tests do not access the real GPU, `/sys`, or debugfs.
+Thermal telemetry, read-only GPU activity telemetry, Nouveau pstate control, the pure governor policy module, validated runtime interval configuration, transactional runtime hardware initialization and cleanup, and a single governor sampling cycle are implemented and covered by unit tests using synthetic files and inputs. The tests do not access the real GPU, `/sys`, or debugfs.
 
-The sampling cycle, daemon loop, signal handling, console output, and systemd service are not yet implemented.
+The application currently executes one sampling cycle, reports its observations and decision, cleans up, and exits. Repeated scheduling, the daemon loop, signal handling, general event reporting, and the systemd service are not yet implemented.
 
 ## Scope
 

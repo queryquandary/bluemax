@@ -7,6 +7,8 @@
 #include "runtime_config.h"
 #include "thermal.h"
 
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 
 /** @brief System paths used to initialize the BlueMax runtime. */
@@ -53,6 +55,46 @@ enum runtime_startup_result {
     RUNTIME_STARTUP_POLICY_ERROR
 };
 
+/** @brief Result category for one runtime governor cycle. */
+enum runtime_cycle_status {
+    RUNTIME_CYCLE_OK,
+    RUNTIME_CYCLE_INVALID_ARGUMENT,
+    RUNTIME_CYCLE_PSTATE_ERROR
+};
+
+/** @brief Hardware observations and decisions produced by one governor cycle. */
+struct runtime_cycle_result {
+    /** Raw snapshot of the four GPU activity registers. */
+    struct gpu_activity_sample activity;
+
+    /** Whether the graphics engine was active in this sample. */
+    bool graphics_activity_detected;
+
+    /** Whether any monitored video engine was active in this sample. */
+    bool video_activity_detected;
+
+    /** Temperature observation supplied to the governor policy. */
+    enum governor_temperature_observation temperature_observation;
+
+    /** Error from a failed scheduled temperature read, otherwise zero. */
+    int temperature_read_error;
+
+    /** Most recent valid temperature retained after this cycle. */
+    int temperature_millidegrees;
+
+    /** Recommendation and event flags returned by the governor policy. */
+    struct governor_policy_result policy;
+
+    /** Whether the policy recommendation differed from the applied pstate. */
+    bool pstate_transition_requested;
+
+    /** Whether a requested pstate transition completed successfully. */
+    bool pstate_transition_succeeded;
+
+    /** Pstate known to be applied after this cycle. */
+    enum gpu_pstate applied_pstate;
+};
+
 /**
  * @brief Initialize all hardware resources and policy state used at runtime.
  *
@@ -70,6 +112,15 @@ enum runtime_startup_result {
 enum runtime_startup_result runtime_start(struct governor_context *context, const struct runtime_config *config, const struct runtime_paths *paths);
 
 /**
+ * @brief Read the current CLOCK_MONOTONIC time in whole milliseconds.
+ *
+ * @param[out] now_ms Destination for the current monotonic time.
+ *
+ * @return 0 on success, or -1 on failure with @c errno set.
+ */
+int runtime_monotonic_time_ms(uint64_t *now_ms);
+
+/**
  * @brief Return a concise description of a runtime startup result.
  *
  * @param[in] result Result returned by runtime_start().
@@ -85,6 +136,27 @@ const char *runtime_startup_result_description(enum runtime_startup_result resul
  * @param[in] context Successfully initialized runtime context.
  */
 void runtime_print_startup_summary(FILE *stream, const struct governor_context *context);
+
+/**
+ * @brief Execute one activity, temperature, policy, and pstate cycle.
+ *
+ * A temperature read failure is returned as a policy observation rather than
+ * a cycle failure. A failed pstate transition leaves the retained applied
+ * pstate unchanged and publishes the completed cycle result for diagnostics.
+ *
+ * @param[in,out] context Successfully initialized runtime context.
+ * @param[in] paths System paths used for hardware control.
+ * @param[in] poll_temperature Whether to read a fresh temperature this cycle.
+ * @param[in] now_ms Current monotonic time in milliseconds.
+ * @param[out] result Observations and decisions from the cycle.
+ *
+ * @return RUNTIME_CYCLE_OK on success, or a failure category with @c errno
+ *         set.
+ */
+enum runtime_cycle_status runtime_run_cycle(struct governor_context *context, const struct runtime_paths *paths, bool poll_temperature, uint64_t now_ms, struct runtime_cycle_result *result);
+
+/** Print the observations and decisions produced by one governor cycle. */
+void runtime_print_cycle_summary(FILE *stream, const struct runtime_cycle_result *result);
 
 /**
  * @brief Release resources retained by a runtime context.
