@@ -69,6 +69,9 @@ enum runtime_cycle_status {
 
 /** @brief Hardware observations and decisions produced by one governor cycle. */
 struct runtime_cycle_result {
+    /** Monotonic time associated with this cycle. */
+    uint64_t now_ms;
+
     /** Raw snapshot of the four GPU activity registers. */
     struct gpu_activity_sample activity;
 
@@ -77,6 +80,15 @@ struct runtime_cycle_result {
 
     /** Whether any monitored video engine was active in this sample. */
     bool video_activity_detected;
+
+    /** Graphics history after this sample, with the newest sample in bit 0. */
+    uint64_t graphics_history;
+
+    /** Video history after this sample, with the newest sample in bit 0. */
+    uint64_t video_history;
+
+    /** Number of real samples represented in each history. */
+    unsigned int activity_history_samples;
 
     /** Temperature observation supplied to the governor policy. */
     enum governor_temperature_observation temperature_observation;
@@ -92,6 +104,9 @@ struct runtime_cycle_result {
 
     /** Whether the policy recommendation differed from the applied pstate. */
     bool pstate_transition_requested;
+
+    /** Whether this cycle attempted to write a requested pstate. */
+    bool pstate_transition_attempted;
 
     /** Whether a requested pstate transition completed successfully. */
     bool pstate_transition_succeeded;
@@ -124,6 +139,18 @@ enum runtime_startup_result runtime_start(struct governor_context *context, cons
  * @return 0 on success, or -1 on failure with @c errno set.
  */
 int runtime_monotonic_time_ms(uint64_t *now_ms);
+
+/**
+ * @brief Sleep until an absolute CLOCK_MONOTONIC deadline.
+ *
+ * Interrupted sleeps resume against the same absolute deadline so they cannot
+ * introduce schedule drift.
+ *
+ * @param[in] deadline_ms Absolute monotonic deadline in milliseconds.
+ *
+ * @return 0 on success, or -1 on failure with @c errno set.
+ */
+int runtime_sleep_until_ms(uint64_t deadline_ms);
 
 /**
  * @brief Return a concise description of a runtime startup result.
@@ -160,8 +187,29 @@ void runtime_print_startup_summary(FILE *stream, const struct governor_context *
  */
 enum runtime_cycle_status runtime_run_cycle(struct governor_context *context, const struct runtime_paths *paths, bool poll_temperature, uint64_t now_ms, struct runtime_cycle_result *result);
 
+/**
+ * @brief Execute one governor cycle without applying pstate recommendations.
+ *
+ * Hardware telemetry and policy state advance normally, but the pstate file is
+ * never opened for writing. Requested transitions are published in @p result
+ * with pstate_transition_attempted set to false.
+ *
+ * @param[in,out] context Successfully initialized runtime context.
+ * @param[in] paths System paths retained for the common cycle interface.
+ * @param[in] poll_temperature Whether to read a fresh temperature this cycle.
+ * @param[in] now_ms Current monotonic time in milliseconds.
+ * @param[out] result Observations and decisions from the cycle.
+ *
+ * @return RUNTIME_CYCLE_OK on success, or RUNTIME_CYCLE_INVALID_ARGUMENT with
+ *         @c errno set.
+ */
+enum runtime_cycle_status runtime_observe_cycle(struct governor_context *context, const struct runtime_paths *paths, bool poll_temperature, uint64_t now_ms, struct runtime_cycle_result *result);
+
 /** Print the observations and decisions produced by one governor cycle. */
 void runtime_print_cycle_summary(FILE *stream, const struct runtime_cycle_result *result);
+
+/** Print one compact periodic observation on a single line. */
+void runtime_print_observation_summary(FILE *stream, const struct runtime_cycle_result *result);
 
 /**
  * @brief Release resources retained by a runtime context.

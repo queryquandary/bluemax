@@ -37,6 +37,37 @@ int runtime_monotonic_time_ms(uint64_t *now_ms)
     return 0;
 }
 
+int runtime_sleep_until_ms(uint64_t deadline_ms)
+{
+    uint64_t seconds = deadline_ms / 1000U;
+    time_t deadline_seconds = (time_t)seconds;
+
+    if (deadline_seconds < 0 || (uint64_t)deadline_seconds != seconds)
+    {
+        errno = EOVERFLOW;
+        return -1;
+    }
+
+    const struct timespec deadline = {
+        .tv_sec = deadline_seconds,
+        .tv_nsec = (long)(deadline_ms % 1000U) * 1000000L,
+    };
+
+    int sleep_error;
+    do
+    {
+        sleep_error = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL);
+    } while (sleep_error == EINTR);
+
+    if (sleep_error != 0)
+    {
+        errno = sleep_error;
+        return -1;
+    }
+
+    return 0;
+}
+
 /** Release a candidate mapping without hiding the startup failure. */
 static enum runtime_startup_result rollback_mapping(struct governor_context *candidate, enum runtime_startup_result result)
 {
@@ -164,7 +195,8 @@ void runtime_print_startup_summary(FILE *stream, const struct governor_context *
     fprintf(stream, "BAR0 telemetry:            mapped read-only (%zu MiB)\n\n", context->gpu.bar0_length / (1024U * 1024U));
 }
 
-enum runtime_cycle_status runtime_run_cycle(struct governor_context *context, const struct runtime_paths *paths, bool poll_temperature, uint64_t now_ms, struct runtime_cycle_result *result)
+/** Execute one cycle with hardware actuation either enabled or suppressed. */
+static enum runtime_cycle_status execute_cycle(struct governor_context *context, const struct runtime_paths *paths, bool poll_temperature, bool apply_pstate, uint64_t now_ms, struct runtime_cycle_result *result)
 {
     if (context == NULL || paths == NULL || paths->pstate_path == NULL || result == NULL)
     {
@@ -172,7 +204,9 @@ enum runtime_cycle_status runtime_run_cycle(struct governor_context *context, co
         return RUNTIME_CYCLE_INVALID_ARGUMENT;
     }
 
-    struct runtime_cycle_result cycle = {0};
+    struct runtime_cycle_result cycle = {
+        .now_ms = now_ms,
+    };
 
     // Capture all four registers before doing slower filesystem work so they
     // describe one closely grouped activity observation.
@@ -218,10 +252,15 @@ enum runtime_cycle_status runtime_run_cycle(struct governor_context *context, co
     // retained applied state changes only on success, a later cycle will retry
     // any recommendation that the GPU did not accept.
     cycle.policy = governor_policy_step(&context->policy, &input);
+    cycle.graphics_history = context->policy.graphics_history;
+    cycle.video_history = context->policy.video_history;
+    cycle.activity_history_samples = context->policy.activity_history_samples;
     cycle.pstate_transition_requested = cycle.policy.recommended_pstate != context->applied_pstate;
 
-    if (cycle.pstate_transition_requested)
+    if (cycle.pstate_transition_requested && apply_pstate)
     {
+        cycle.pstate_transition_attempted = true;
+
         if (gpu_pstate_set(paths->pstate_path, cycle.policy.recommended_pstate) == -1)
         {
             // Publish the observations and decision on failure so callers can
@@ -242,15 +281,42 @@ enum runtime_cycle_status runtime_run_cycle(struct governor_context *context, co
     return RUNTIME_CYCLE_OK;
 }
 
+enum runtime_cycle_status runtime_run_cycle(struct governor_context *context, const struct runtime_paths *paths, bool poll_temperature, uint64_t now_ms, struct runtime_cycle_result *result)
+{
+    return execute_cycle(context, paths, poll_temperature, true, now_ms, result);
+}
+
+enum runtime_cycle_status runtime_observe_cycle(struct governor_context *context, const struct runtime_paths *paths, bool poll_temperature, uint64_t now_ms, struct runtime_cycle_result *result)
+{
+    return execute_cycle(context, paths, poll_temperature, false, now_ms, result);
+}
+
+/** Count active samples in one 64-bit activity history. */
+static unsigned int history_active_samples(uint64_t history)
+{
+    unsigned int active_samples = 0;
+
+    while (history != 0)
+    {
+        active_samples += (unsigned int)(history & 1U);
+        history >>= 1;
+    }
+
+    return active_samples;
+}
+
 void runtime_print_cycle_summary(FILE *stream, const struct runtime_cycle_result *result)
 {
-    fprintf(stream, "Governor cycle\n\n");
+    fprintf(stream, "Governor cycle at %llu.%03llu s\n\n", (unsigned long long)(result->now_ms / 1000U), (unsigned long long)(result->now_ms % 1000U));
     fprintf(stream, "PGRAPH:                    0x%08x\n", (unsigned int)result->activity.pgraph);
     fprintf(stream, "PVLD:                      0x%08x\n", (unsigned int)result->activity.pvld);
     fprintf(stream, "PPDEC:                     0x%08x\n", (unsigned int)result->activity.ppdec);
     fprintf(stream, "PPPP:                      0x%08x\n", (unsigned int)result->activity.pppp);
     fprintf(stream, "Graphics activity:         %s\n", result->graphics_activity_detected ? "active" : "idle");
     fprintf(stream, "Video activity:            %s\n", result->video_activity_detected ? "active" : "idle");
+    fprintf(stream, "History samples:            %u of 64\n", result->activity_history_samples);
+    fprintf(stream, "Graphics history:           0x%016llx (%u active)\n", (unsigned long long)result->graphics_history, history_active_samples(result->graphics_history));
+    fprintf(stream, "Video history:              0x%016llx (%u active)\n", (unsigned long long)result->video_history, history_active_samples(result->video_history));
 
     if (result->temperature_observation == GOVERNOR_TEMPERATURE_NOT_POLLED)
         fprintf(stream, "Temperature observation:   not polled\n");
@@ -268,12 +334,36 @@ void runtime_print_cycle_summary(FILE *stream, const struct runtime_cycle_result
 
     if (!result->pstate_transition_requested)
         fprintf(stream, "Pstate transition:         not required\n");
+    else if (!result->pstate_transition_attempted)
+        fprintf(stream, "Pstate transition:         suppressed (observation only)\n");
     else if (result->pstate_transition_succeeded)
         fprintf(stream, "Pstate transition:         succeeded\n");
     else
         fprintf(stream, "Pstate transition:         failed\n");
 
     fprintf(stream, "Applied pstate:            %s\n\n", pstate_name(result->applied_pstate));
+}
+
+void runtime_print_observation_summary(FILE *stream, const struct runtime_cycle_result *result)
+{
+    fprintf(stream, "Observation at %llu.%03llu s: graphics %u/%u 0x%016llx; video %u/%u 0x%016llx; ",
+        (unsigned long long)(result->now_ms / 1000U),
+        (unsigned long long)(result->now_ms % 1000U),
+        history_active_samples(result->graphics_history),
+        result->activity_history_samples,
+        (unsigned long long)result->graphics_history,
+        history_active_samples(result->video_history),
+        result->activity_history_samples,
+        (unsigned long long)result->video_history);
+
+    if (result->temperature_observation == GOVERNOR_TEMPERATURE_VALID)
+        fprintf(stream, "temperature %.1f C; ", result->temperature_millidegrees / 1000.0);
+    else if (result->temperature_observation == GOVERNOR_TEMPERATURE_READ_FAILED)
+        fprintf(stream, "temperature read failed (%s), retained %.1f C; ", strerror(result->temperature_read_error), result->temperature_millidegrees / 1000.0);
+    else
+        fprintf(stream, "temperature not polled, retained %.1f C; ", result->temperature_millidegrees / 1000.0);
+
+    fprintf(stream, "target %s; applied %s\n", pstate_name(result->policy.recommended_pstate), pstate_name(result->applied_pstate));
 }
 
 int runtime_cleanup(struct governor_context *context)

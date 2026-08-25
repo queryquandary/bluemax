@@ -261,7 +261,7 @@ static int test_initializes_supported_pstates(void)
         enum gpu_pstate target;
     } cases[] = {
         {"03: low *\n07: medium\n0f: high\n", GPU_PSTATE_LOW, GPU_PSTATE_LOW},
-        {"03: low\n07: medium *\n0f: high\n", GPU_PSTATE_MEDIUM, GPU_PSTATE_LOW},
+        {"03: low\n07: medium *\n0f: high\n", GPU_PSTATE_MEDIUM, GPU_PSTATE_MEDIUM},
         {"03: low\n07: medium\n0f: high *\n", GPU_PSTATE_HIGH, GPU_PSTATE_HIGH},
     };
 
@@ -369,9 +369,13 @@ static int test_cycle_classifies_activity(void)
         CHECK(cycle.activity.pppp == cases[index].activity.pppp);
         CHECK(cycle.graphics_activity_detected == cases[index].graphics);
         CHECK(cycle.video_activity_detected == cases[index].video);
+        CHECK(cycle.graphics_history == context.policy.graphics_history);
+        CHECK(cycle.video_history == context.policy.video_history);
+        CHECK(cycle.activity_history_samples == 1);
         CHECK(cycle.temperature_observation == GOVERNOR_TEMPERATURE_NOT_POLLED);
         CHECK(cycle.temperature_read_error == 0);
         CHECK(!cycle.pstate_transition_requested);
+        CHECK(!cycle.pstate_transition_attempted);
     }
 
 cleanup:
@@ -423,7 +427,7 @@ cleanup:
     return result;
 }
 
-/** Verify MEDIUM reconciliation and avoidance of redundant pstate writes. */
+/** Verify MEDIUM waits for sustained inactivity before transitioning to LOW. */
 static int test_cycle_applies_only_required_pstate_transition(void)
 {
     struct runtime_fixture fixture;
@@ -442,11 +446,17 @@ static int test_cycle_applies_only_required_pstate_transition(void)
     CHECK(test_write_text(fixture.root, "pstate", "03: low\n07: medium *\n0f: high\n") == 0);
     CHECK(runtime_start(&context, &config, &fixture.paths) == RUNTIME_STARTUP_OK);
     CHECK(context.applied_pstate == GPU_PSTATE_MEDIUM);
-    CHECK(context.policy.target_pstate == GPU_PSTATE_LOW);
+    CHECK(context.policy.target_pstate == GPU_PSTATE_MEDIUM);
 
     CHECK(test_write_text(fixture.root, "pstate", "") == 0);
     CHECK(runtime_run_cycle(&context, &fixture.paths, false, context.policy.last_activity_ms, &cycle) == RUNTIME_CYCLE_OK);
+    CHECK(!cycle.pstate_transition_requested);
+    CHECK(!cycle.pstate_transition_attempted);
+    CHECK(cycle.applied_pstate == GPU_PSTATE_MEDIUM);
+
+    CHECK(runtime_run_cycle(&context, &fixture.paths, false, context.policy.last_activity_ms + 10000, &cycle) == RUNTIME_CYCLE_OK);
     CHECK(cycle.pstate_transition_requested);
+    CHECK(cycle.pstate_transition_attempted);
     CHECK(cycle.pstate_transition_succeeded);
     CHECK(cycle.applied_pstate == GPU_PSTATE_LOW);
     CHECK(context.applied_pstate == GPU_PSTATE_LOW);
@@ -454,8 +464,9 @@ static int test_cycle_applies_only_required_pstate_transition(void)
     CHECK(strcmp(command, "03\n") == 0);
 
     test_remove_file(fixture.root, "pstate");
-    CHECK(runtime_run_cycle(&context, &fixture.paths, false, context.policy.last_activity_ms + 1, &cycle) == RUNTIME_CYCLE_OK);
+    CHECK(runtime_run_cycle(&context, &fixture.paths, false, context.policy.last_activity_ms + 10001, &cycle) == RUNTIME_CYCLE_OK);
     CHECK(!cycle.pstate_transition_requested);
+    CHECK(!cycle.pstate_transition_attempted);
     CHECK(!cycle.pstate_transition_succeeded);
     CHECK(cycle.applied_pstate == GPU_PSTATE_LOW);
 
@@ -482,38 +493,87 @@ static int test_cycle_retries_failed_pstate_transition(void)
     struct governor_context context = {0};
     struct runtime_cycle_result cycle;
     const struct gpu_activity_sample graphics_activity = {.pgraph = 1};
+    const struct gpu_activity_sample idle_activity = {0};
     char command[16];
 
     CHECK(runtime_start(&context, &config, &fixture.paths) == RUNTIME_STARTUP_OK);
-    CHECK(fixture_write_activity(&fixture, &graphics_activity) == 0);
     uint64_t initial_ms = context.policy.last_activity_ms;
 
-    CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + 10, &cycle) == RUNTIME_CYCLE_OK);
-    CHECK(!cycle.pstate_transition_requested);
-    CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + 20, &cycle) == RUNTIME_CYCLE_OK);
-    CHECK(!cycle.pstate_transition_requested);
+    for (unsigned int index = 0; index < 63; index++)
+    {
+        bool active = index < 4
+            || (index >= 32 && index < 36)
+            || index >= 60;
+        const struct gpu_activity_sample *activity = active ? &graphics_activity : &idle_activity;
 
+        CHECK(fixture_write_activity(&fixture, activity) == 0);
+        CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + (uint64_t)(index + 1) * 10, &cycle) == RUNTIME_CYCLE_OK);
+        CHECK(!cycle.pstate_transition_requested);
+    }
+
+    CHECK(fixture_write_activity(&fixture, &graphics_activity) == 0);
     test_remove_file(fixture.root, "pstate");
     errno = 0;
-    CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + 30, &cycle) == RUNTIME_CYCLE_PSTATE_ERROR);
+    CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + 640, &cycle) == RUNTIME_CYCLE_PSTATE_ERROR);
     CHECK(errno == ENOENT);
     CHECK(cycle.policy.recommended_pstate == GPU_PSTATE_HIGH);
     CHECK((cycle.policy.events & GOVERNOR_POLICY_EVENT_GRAPHICS_UPSHIFT) != 0);
     CHECK(cycle.pstate_transition_requested);
+    CHECK(cycle.pstate_transition_attempted);
     CHECK(!cycle.pstate_transition_succeeded);
     CHECK(cycle.applied_pstate == GPU_PSTATE_LOW);
     CHECK(context.applied_pstate == GPU_PSTATE_LOW);
     CHECK(context.policy.target_pstate == GPU_PSTATE_HIGH);
 
     CHECK(test_write_text(fixture.root, "pstate", "") == 0);
-    CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + 40, &cycle) == RUNTIME_CYCLE_OK);
+    CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + 650, &cycle) == RUNTIME_CYCLE_OK);
     CHECK(cycle.policy.recommended_pstate == GPU_PSTATE_HIGH);
     CHECK(cycle.policy.events == GOVERNOR_POLICY_EVENT_NONE);
     CHECK(cycle.pstate_transition_requested);
+    CHECK(cycle.pstate_transition_attempted);
     CHECK(cycle.pstate_transition_succeeded);
     CHECK(context.applied_pstate == GPU_PSTATE_HIGH);
     CHECK(test_read_text(fixture.root, "pstate", command, sizeof(command)) == 0);
     CHECK(strcmp(command, "0f\n") == 0);
+
+cleanup:
+    if (context.gpu.bar0_address != NULL)
+        runtime_cleanup(&context);
+
+    fixture_destroy(&fixture);
+    return result;
+}
+
+/** Verify observation-only cycles never open the pstate interface for writing. */
+static int test_cycle_suppresses_pstate_transition(void)
+{
+    struct runtime_fixture fixture;
+    if (fixture_create(&fixture) == -1)
+    {
+        perror("fixture_create");
+        return -1;
+    }
+
+    int result = 0;
+    struct runtime_config config = {10, 1000};
+    struct governor_context context = {0};
+    struct runtime_cycle_result cycle;
+
+    CHECK(test_write_text(fixture.root, "pstate", "03: low\n07: medium *\n0f: high\n") == 0);
+    CHECK(runtime_start(&context, &config, &fixture.paths) == RUNTIME_STARTUP_OK);
+    CHECK(context.applied_pstate == GPU_PSTATE_MEDIUM);
+    CHECK(context.policy.target_pstate == GPU_PSTATE_MEDIUM);
+
+    test_remove_file(fixture.root, "pstate");
+    CHECK(runtime_observe_cycle(&context, &fixture.paths, false, context.policy.last_activity_ms + 10000, &cycle) == RUNTIME_CYCLE_OK);
+    CHECK(cycle.pstate_transition_requested);
+    CHECK(!cycle.pstate_transition_attempted);
+    CHECK(!cycle.pstate_transition_succeeded);
+    CHECK(cycle.policy.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(cycle.applied_pstate == GPU_PSTATE_MEDIUM);
+    CHECK(context.applied_pstate == GPU_PSTATE_MEDIUM);
+    CHECK(access(fixture.pstate_path, F_OK) == -1);
+    CHECK(errno == ENOENT);
 
 cleanup:
     if (context.gpu.bar0_address != NULL)
@@ -529,14 +589,19 @@ static int test_prints_cycle_summary(void)
     int result = 0;
     FILE *stream = tmpfile();
     char summary[2048];
-    const struct runtime_cycle_result cycle = {
+    struct runtime_cycle_result cycle = {
+        .now_ms = 1234,
         .activity = {0x11, 0x22, 0x33, 0x44},
         .graphics_activity_detected = true,
         .video_activity_detected = true,
+        .graphics_history = UINT64_C(0x8000000000000011),
+        .video_history = UINT64_C(0x0000000000000022),
+        .activity_history_samples = 64,
         .temperature_observation = GOVERNOR_TEMPERATURE_NOT_POLLED,
         .temperature_millidegrees = 51000,
         .policy = {GPU_PSTATE_HIGH, GOVERNOR_POLICY_EVENT_GRAPHICS_UPSHIFT},
         .pstate_transition_requested = true,
+        .pstate_transition_attempted = true,
         .pstate_transition_succeeded = true,
         .applied_pstate = GPU_PSTATE_HIGH,
     };
@@ -550,17 +615,86 @@ static int test_prints_cycle_summary(void)
     CHECK(!ferror(stream));
     summary[received] = '\0';
 
-    CHECK(strstr(summary, "Governor cycle") != NULL);
+    CHECK(strstr(summary, "Governor cycle at 1.234 s") != NULL);
     CHECK(strstr(summary, "PGRAPH:                    0x00000011") != NULL);
     CHECK(strstr(summary, "PVLD:                      0x00000022") != NULL);
     CHECK(strstr(summary, "PPDEC:                     0x00000033") != NULL);
     CHECK(strstr(summary, "PPPP:                      0x00000044") != NULL);
     CHECK(strstr(summary, "Graphics activity:         active") != NULL);
     CHECK(strstr(summary, "Video activity:            active") != NULL);
+    CHECK(strstr(summary, "History samples:            64 of 64") != NULL);
+    CHECK(strstr(summary, "Graphics history:           0x8000000000000011 (3 active)") != NULL);
+    CHECK(strstr(summary, "Video history:              0x0000000000000022 (2 active)") != NULL);
     CHECK(strstr(summary, "Temperature observation:   not polled") != NULL);
     CHECK(strstr(summary, "Policy recommendation:     HIGH (0f)") != NULL);
     CHECK(strstr(summary, "Pstate transition:         succeeded") != NULL);
     CHECK(strstr(summary, "Applied pstate:            HIGH (0f)") != NULL);
+
+    cycle.pstate_transition_attempted = false;
+    cycle.pstate_transition_succeeded = false;
+    CHECK(ftruncate(fileno(stream), 0) == 0);
+    rewind(stream);
+    runtime_print_cycle_summary(stream, &cycle);
+    CHECK(fflush(stream) == 0);
+    CHECK(fseek(stream, 0, SEEK_SET) == 0);
+
+    received = fread(summary, 1, sizeof(summary) - 1, stream);
+    CHECK(!ferror(stream));
+    summary[received] = '\0';
+    CHECK(strstr(summary, "Pstate transition:         suppressed (observation only)") != NULL);
+
+cleanup:
+    if (stream != NULL)
+        fclose(stream);
+
+    return result;
+}
+
+/** Capture and verify compact periodic observation output. */
+static int test_prints_observation_summary(void)
+{
+    int result = 0;
+    FILE *stream = tmpfile();
+    char summary[1024];
+    struct runtime_cycle_result cycle = {
+        .now_ms = 9876,
+        .graphics_history = UINT64_C(0x8000000000000011),
+        .video_history = UINT64_C(0x0000000000000022),
+        .activity_history_samples = 64,
+        .temperature_observation = GOVERNOR_TEMPERATURE_VALID,
+        .temperature_millidegrees = 45500,
+        .policy = {GPU_PSTATE_HIGH, GOVERNOR_POLICY_EVENT_NONE},
+        .applied_pstate = GPU_PSTATE_MEDIUM,
+    };
+
+    CHECK(stream != NULL);
+    runtime_print_observation_summary(stream, &cycle);
+    CHECK(fflush(stream) == 0);
+    CHECK(fseek(stream, 0, SEEK_SET) == 0);
+
+    size_t received = fread(summary, 1, sizeof(summary) - 1, stream);
+    CHECK(!ferror(stream));
+    summary[received] = '\0';
+
+    CHECK(strstr(summary, "Observation at 9.876 s:") != NULL);
+    CHECK(strstr(summary, "graphics 3/64 0x8000000000000011") != NULL);
+    CHECK(strstr(summary, "video 2/64 0x0000000000000022") != NULL);
+    CHECK(strstr(summary, "temperature 45.5 C") != NULL);
+    CHECK(strstr(summary, "target HIGH (0f); applied MEDIUM (07)") != NULL);
+    CHECK(strchr(summary, '\n') == summary + strlen(summary) - 1);
+
+    cycle.temperature_observation = GOVERNOR_TEMPERATURE_READ_FAILED;
+    cycle.temperature_read_error = EIO;
+    CHECK(ftruncate(fileno(stream), 0) == 0);
+    rewind(stream);
+    runtime_print_observation_summary(stream, &cycle);
+    CHECK(fflush(stream) == 0);
+    CHECK(fseek(stream, 0, SEEK_SET) == 0);
+
+    received = fread(summary, 1, sizeof(summary) - 1, stream);
+    CHECK(!ferror(stream));
+    summary[received] = '\0';
+    CHECK(strstr(summary, "temperature read failed (Input/output error), retained 45.5 C") != NULL);
 
 cleanup:
     if (stream != NULL)
@@ -611,6 +745,30 @@ cleanup:
     return result;
 }
 
+/** Verify absolute monotonic sleeps handle elapsed and future deadlines. */
+static int test_sleeps_until_absolute_deadline(void)
+{
+    int result = 0;
+    uint64_t before_ms;
+    uint64_t after_ms;
+
+    CHECK(runtime_monotonic_time_ms(&before_ms) == 0);
+    CHECK(runtime_sleep_until_ms(0) == 0);
+    CHECK(runtime_monotonic_time_ms(&after_ms) == 0);
+    CHECK(after_ms >= before_ms);
+
+    const uint64_t wait_ms = 20;
+    CHECK(after_ms <= UINT64_MAX - wait_ms);
+    uint64_t deadline_ms = after_ms + wait_ms;
+
+    CHECK(runtime_sleep_until_ms(deadline_ms) == 0);
+    CHECK(runtime_monotonic_time_ms(&after_ms) == 0);
+    CHECK(after_ms >= deadline_ms);
+
+cleanup:
+    return result;
+}
+
 /** Verify programmer-error inputs and cleanup arguments are rejected safely. */
 static int test_rejects_invalid_arguments(void)
 {
@@ -658,6 +816,18 @@ static int test_rejects_invalid_arguments(void)
     CHECK(runtime_run_cycle(&context, &paths, false, 0, NULL) == RUNTIME_CYCLE_INVALID_ARGUMENT);
     CHECK(errno == EINVAL);
 
+    errno = 0;
+    CHECK(runtime_observe_cycle(NULL, &paths, false, 0, &cycle) == RUNTIME_CYCLE_INVALID_ARGUMENT);
+    CHECK(errno == EINVAL);
+
+    errno = 0;
+    CHECK(runtime_observe_cycle(&context, NULL, false, 0, &cycle) == RUNTIME_CYCLE_INVALID_ARGUMENT);
+    CHECK(errno == EINVAL);
+
+    errno = 0;
+    CHECK(runtime_observe_cycle(&context, &paths, false, 0, NULL) == RUNTIME_CYCLE_INVALID_ARGUMENT);
+    CHECK(errno == EINVAL);
+
 cleanup:
     return result;
 }
@@ -676,8 +846,11 @@ int main(void)
         {"cycle processes temperature reads", test_cycle_processes_temperature_reads},
         {"cycle applies only required transition", test_cycle_applies_only_required_pstate_transition},
         {"cycle retries failed transition", test_cycle_retries_failed_pstate_transition},
+        {"cycle suppresses pstate transition", test_cycle_suppresses_pstate_transition},
         {"prints cycle summary", test_prints_cycle_summary},
+        {"prints observation summary", test_prints_observation_summary},
         {"reports hardware failures transactionally", test_reports_hardware_failures_transactionally},
+        {"sleeps until absolute deadline", test_sleeps_until_absolute_deadline},
         {"rejects invalid arguments", test_rejects_invalid_arguments},
     };
 

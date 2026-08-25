@@ -56,18 +56,32 @@ int main(int argc, char *argv[])
     }
 
     runtime_print_startup_summary(stdout, &context);
+    fputs("Pstate actuation:          disabled (observation only)\n\n", stdout);
 
     int exit_status = EXIT_SUCCESS;
-    uint64_t now_ms;
-    struct runtime_cycle_result cycle;
-
-    if (runtime_monotonic_time_ms(&now_ms) == -1)
+    if (fflush(stdout) == EOF)
     {
-        fprintf(stderr, "%s: cannot read monotonic clock: %s\n", argv[0], strerror(errno));
+        fprintf(stderr, "%s: cannot write startup summary: %s\n", argv[0], strerror(errno));
         exit_status = EXIT_FAILURE;
     }
-    else
+
+    while (exit_status == EXIT_SUCCESS)
     {
+        if (runtime_sleep_until_ms(context.schedule.next_sample_deadline_ms) == -1)
+        {
+            fprintf(stderr, "%s: cannot wait for sampling deadline: %s\n", argv[0], strerror(errno));
+            exit_status = EXIT_FAILURE;
+            break;
+        }
+
+        uint64_t now_ms;
+        if (runtime_monotonic_time_ms(&now_ms) == -1)
+        {
+            fprintf(stderr, "%s: cannot read monotonic clock: %s\n", argv[0], strerror(errno));
+            exit_status = EXIT_FAILURE;
+            break;
+        }
+
         bool poll_temperature;
 
         // The independent temperature timeline decides whether this activity
@@ -76,47 +90,56 @@ int main(int argc, char *argv[])
         {
             fprintf(stderr, "%s: cannot prepare sampling schedule: %s\n", argv[0], strerror(errno));
             exit_status = EXIT_FAILURE;
+            break;
         }
-        else
+
+        struct runtime_cycle_result cycle;
+        enum runtime_cycle_status cycle_status = runtime_observe_cycle(&context, &system_paths, poll_temperature, now_ms, &cycle);
+        if (cycle_status != RUNTIME_CYCLE_OK)
         {
-            enum runtime_cycle_status cycle_status = runtime_run_cycle(&context, &system_paths, poll_temperature, now_ms, &cycle);
+            fprintf(stderr, "%s: cannot execute governor cycle: %s\n", argv[0], strerror(errno));
+            exit_status = EXIT_FAILURE;
+            break;
+        }
 
-            // Preserve independent cycle and scheduling errors across console
-            // output so diagnostics retain their original causes.
-            int cycle_error = errno;
-            int schedule_error = 0;
-            uint64_t completed_ms;
+        bool report_written = cycle.policy.events != GOVERNOR_POLICY_EVENT_NONE || poll_temperature;
 
-            // Advance from time measured after MMIO, temperature, policy, and
-            // pstate work. A slow cycle therefore skips deadlines consumed
-            // while that work was running instead of replaying them.
-            if (runtime_monotonic_time_ms(&completed_ms) == -1)
-                schedule_error = errno;
-            else if (sampling_schedule_complete(&context.schedule, &context.config, completed_ms, poll_temperature) == -1)
-                schedule_error = errno;
-
+        if (cycle.policy.events != GOVERNOR_POLICY_EVENT_NONE)
             runtime_print_cycle_summary(stdout, &cycle);
+        else if (poll_temperature)
+            runtime_print_observation_summary(stdout, &cycle);
 
-            if (cycle_status == RUNTIME_CYCLE_PSTATE_ERROR)
+        if (report_written)
+        {
+            if (fflush(stdout) == EOF)
             {
-                fprintf(stderr, "%s: cannot apply recommended GPU pstate: %s\n", argv[0], strerror(cycle_error));
+                fprintf(stderr, "%s: cannot write governor observation: %s\n", argv[0], strerror(errno));
                 exit_status = EXIT_FAILURE;
+                break;
             }
-            else if (cycle_status != RUNTIME_CYCLE_OK)
-            {
-                fprintf(stderr, "%s: cannot execute governor cycle: %s\n", argv[0], strerror(cycle_error));
-                exit_status = EXIT_FAILURE;
-            }
-            else if (schedule_error != 0)
-            {
-                fprintf(stderr, "%s: cannot advance sampling schedule: %s\n", argv[0], strerror(schedule_error));
-                exit_status = EXIT_FAILURE;
-            }
+        }
+
+        // Advance from time measured after MMIO, temperature, policy, and
+        // pstate work. A slow cycle therefore skips deadlines consumed while
+        // that work was running instead of replaying them.
+        uint64_t completed_ms;
+        if (runtime_monotonic_time_ms(&completed_ms) == -1)
+        {
+            fprintf(stderr, "%s: cannot read monotonic clock after governor cycle: %s\n", argv[0], strerror(errno));
+            exit_status = EXIT_FAILURE;
+            break;
+        }
+
+        if (sampling_schedule_complete(&context.schedule, &context.config, completed_ms, poll_temperature) == -1)
+        {
+            fprintf(stderr, "%s: cannot advance sampling schedule: %s\n", argv[0], strerror(errno));
+            exit_status = EXIT_FAILURE;
+            break;
         }
     }
 
     // Every path after successful startup reaches cleanup, including clock and
-    // pstate failures, so the BAR0 mapping is never intentionally retained.
+    // telemetry failures, so the BAR0 mapping is never intentionally retained.
     if (runtime_cleanup(&context) == -1)
     {
         fprintf(stderr, "%s: cannot unmap GPU BAR0 resource: %s\n", argv[0], strerror(errno));
