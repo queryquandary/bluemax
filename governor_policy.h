@@ -76,6 +76,9 @@ struct governor_policy {
     /** Video activity history, with the newest sample in bit 0. */
     uint64_t video_history;
 
+    /** Number of real samples represented in each history, saturating at 64. */
+    unsigned int activity_history_samples;
+
     /** Monotonic time at which the policy most recently entered HIGH. */
     uint64_t high_since_ms;
 
@@ -105,8 +108,9 @@ struct governor_policy {
  * @brief Initialize a governor policy from known startup state.
  *
  * The initial temperature is a valid reading obtained during thermal-sensor
- * discovery. The policy uses only LOW and HIGH automatically, so an initial
- * MEDIUM state is normalized to LOW.
+ * discovery. An initial MEDIUM state is retained until qualified activity
+ * selects HIGH or sustained inactivity selects LOW. MEDIUM is not selected
+ * again after that startup decision.
  *
  * @param[out] policy Destination for the initialized policy state.
  * @param[in] initial_pstate Performance state active at startup.

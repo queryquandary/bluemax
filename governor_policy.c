@@ -9,26 +9,35 @@
 #include <string.h>
 
 enum {
+    /** Number of samples retained by each activity history. */
+    ACTIVITY_HISTORY_SAMPLES = 64,
+
     /** Minimum time the governor must remain in HIGH. */
     HIGH_MIN_RESIDENCY_MS = 500,
 
     /** Required continuous inactivity before returning to LOW. */
-    IDLE_DOWNSHIFT_DELAY_MS = 2000,
+    IDLE_DOWNSHIFT_DELAY_MS = 10000,
 
     /** Time without valid temperature telemetry before forcing LOW. */
     TEMPERATURE_FAULT_TIMEOUT_MS = 3000,
 
     /** Number of recent samples considered by the video activity trigger. */
-    VIDEO_TRIGGER_WINDOW = 3,
+    VIDEO_TRIGGER_WINDOW = 32,
 
     /** Active video samples required to request HIGH. */
-    VIDEO_TRIGGER_COUNT = 2,
+    VIDEO_TRIGGER_COUNT = 8,
 
     /** Number of recent samples considered by the graphics activity trigger. */
-    GRAPHICS_TRIGGER_WINDOW = 5,
+    GRAPHICS_TRIGGER_WINDOW = 64,
 
     /** Active graphics samples required to request HIGH. */
-    GRAPHICS_TRIGGER_COUNT = 3
+    GRAPHICS_TRIGGER_COUNT = 12,
+
+    /** Number of samples in each graphics-history region. */
+    GRAPHICS_TRIGGER_REGION_SAMPLES = 16,
+
+    /** Number of graphics-history regions that must contain activity. */
+    GRAPHICS_TRIGGER_REGIONS = 3
 };
 
 /**
@@ -49,6 +58,21 @@ static bool history_reaches_threshold(uint64_t history, unsigned int window, uns
         active_samples += (unsigned int)((history >> index) & 1U);
 
     return active_samples >= required;
+}
+
+/** Determine whether activity is distributed across enough history regions. */
+static bool history_reaches_region_coverage(uint64_t history, unsigned int region_samples, unsigned int required_regions)
+{
+    unsigned int active_regions = 0;
+    const uint64_t region_mask = (UINT64_C(1) << region_samples) - 1U;
+
+    for (unsigned int offset = 0; offset < 64; offset += region_samples)
+    {
+        if (((history >> offset) & region_mask) != 0)
+            active_regions++;
+    }
+
+    return active_regions >= required_regions;
 }
 
 /**
@@ -174,7 +198,7 @@ int governor_policy_init(
     struct governor_policy initialized;
     memset(&initialized, 0, sizeof(initialized));
 
-    initialized.target_pstate = initial_pstate == GPU_PSTATE_HIGH ? GPU_PSTATE_HIGH : GPU_PSTATE_LOW;
+    initialized.target_pstate = initial_pstate;
     initialized.high_since_ms = now_ms;
     initialized.last_activity_ms = now_ms;
     initialized.temperature_max_millidegrees = temperature_max_millidegrees;
@@ -194,6 +218,9 @@ struct governor_policy_result governor_policy_step(struct governor_policy *polic
 {
     policy->graphics_history = (policy->graphics_history << 1) | (input->graphics_activity_detected ? 1U : 0U);
     policy->video_history = (policy->video_history << 1) | (input->video_activity_detected ? 1U : 0U);
+
+    if (policy->activity_history_samples < ACTIVITY_HISTORY_SAMPLES)
+        policy->activity_history_samples++;
 
     bool activity_detected = input->graphics_activity_detected || input->video_activity_detected;
 
@@ -215,9 +242,10 @@ struct governor_policy_result governor_policy_step(struct governor_policy *polic
         return result;
 
     // Decide if we should upshift to HIGH or downshift to LOW based on activity and temperature.
-    if (policy->target_pstate == GPU_PSTATE_LOW)
+    if (policy->target_pstate != GPU_PSTATE_HIGH)
     {
-        bool graphics_triggered = history_reaches_threshold(policy->graphics_history, GRAPHICS_TRIGGER_WINDOW, GRAPHICS_TRIGGER_COUNT);
+        bool graphics_triggered = history_reaches_threshold(policy->graphics_history, GRAPHICS_TRIGGER_WINDOW, GRAPHICS_TRIGGER_COUNT)
+            && history_reaches_region_coverage(policy->graphics_history, GRAPHICS_TRIGGER_REGION_SAMPLES, GRAPHICS_TRIGGER_REGIONS);
         bool video_triggered = history_reaches_threshold(policy->video_history, VIDEO_TRIGGER_WINDOW, VIDEO_TRIGGER_COUNT);
 
         if (graphics_triggered || video_triggered)
@@ -231,6 +259,13 @@ struct governor_policy_result governor_policy_step(struct governor_policy *polic
 
             if (video_triggered)
                 result.events |= GOVERNOR_POLICY_EVENT_VIDEO_UPSHIFT;
+        }
+        else if (policy->target_pstate == GPU_PSTATE_MEDIUM
+            && interval_has_elapsed(input->now_ms, policy->last_activity_ms, IDLE_DOWNSHIFT_DELAY_MS))
+        {
+            policy->target_pstate = GPU_PSTATE_LOW;
+            result.recommended_pstate = policy->target_pstate;
+            result.events |= GOVERNOR_POLICY_EVENT_IDLE_DOWNSHIFT;
         }
     }
     else if (policy->target_pstate == GPU_PSTATE_HIGH

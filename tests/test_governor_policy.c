@@ -146,7 +146,7 @@ static int test_initializes_supported_pstates(void)
         enum gpu_pstate expected;
     } cases[] = {
         {GPU_PSTATE_LOW, GPU_PSTATE_LOW},
-        {GPU_PSTATE_MEDIUM, GPU_PSTATE_LOW},
+        {GPU_PSTATE_MEDIUM, GPU_PSTATE_MEDIUM},
         {GPU_PSTATE_HIGH, GPU_PSTATE_HIGH},
     };
 
@@ -167,7 +167,57 @@ static int test_initializes_supported_pstates(void)
         CHECK(!policy.temperature_fault_active);
         CHECK(policy.graphics_history == 0);
         CHECK(policy.video_history == 0);
+        CHECK(policy.activity_history_samples == 0);
     }
+
+    return 0;
+}
+
+/** Verify startup MEDIUM resolves only after workload or sustained inactivity. */
+static int test_resolves_initial_medium_from_observations(void)
+{
+    struct governor_policy idle_policy;
+    CHECK(governor_policy_init(&idle_policy, GPU_PSTATE_MEDIUM, TEMPERATURE_MAX_MILLIDEGREES, TEMPERATURE_HYSTERESIS_MILLIDEGREES, SAFE_TEMPERATURE_MILLIDEGREES, 1000) == 0);
+
+    struct governor_policy_result result = apply_activity(&idle_policy, 10999, false, false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_MEDIUM);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+
+    result = apply_activity(&idle_policy, 11000, false, false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_IDLE_DOWNSHIFT);
+
+    struct governor_policy active_policy;
+    CHECK(governor_policy_init(&active_policy, GPU_PSTATE_MEDIUM, TEMPERATURE_MAX_MILLIDEGREES, TEMPERATURE_HYSTERESIS_MILLIDEGREES, SAFE_TEMPERATURE_MILLIDEGREES, 20000) == 0);
+
+    for (unsigned int index = 0; index < 63; index++)
+    {
+        bool active = index < 4
+            || (index >= 32 && index < 36)
+            || index >= 60;
+        result = apply_activity(&active_policy, 20010 + (uint64_t)index * 10, active, false);
+        CHECK(result.recommended_pstate == GPU_PSTATE_MEDIUM);
+        CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    }
+
+    result = apply_activity(&active_policy, 20640, true, false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_GRAPHICS_UPSHIFT);
+
+    struct governor_policy delayed_policy;
+    CHECK(governor_policy_init(&delayed_policy, GPU_PSTATE_MEDIUM, TEMPERATURE_MAX_MILLIDEGREES, TEMPERATURE_HYSTERESIS_MILLIDEGREES, SAFE_TEMPERATURE_MILLIDEGREES, 30000) == 0);
+
+    result = apply_activity(&delayed_policy, 39999, true, false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_MEDIUM);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+
+    result = apply_activity(&delayed_policy, 49998, false, false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_MEDIUM);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+
+    result = apply_activity(&delayed_policy, 49999, false, false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_IDLE_DOWNSHIFT);
 
     return 0;
 }
@@ -250,7 +300,7 @@ static int test_rejects_invalid_inputs(void)
 }
 
 /**
- * @brief Verify that two active video samples among three request HIGH.
+ * @brief Verify that eight active video samples among thirty-two request HIGH.
  *
  * @return 0 when the video trigger behaves correctly, or -1 on failure.
  */
@@ -259,26 +309,27 @@ static int test_video_activity_requests_high(void)
     struct governor_policy policy;
     CHECK(initialize_low_policy(&policy, 1000) == 0);
 
-    struct governor_policy_result result =
-        apply_activity(&policy, 1010, false, true);
-    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
-    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    struct governor_policy_result result;
+    for (unsigned int index = 0; index < 31; index++)
+    {
+        bool active = index == 0 || index == 4 || index == 8 || index == 12
+            || index == 16 || index == 20 || index == 24;
+        result = apply_activity(&policy, 1010 + (uint64_t)index * 10, false, active);
+        CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+        CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    }
 
-    result = apply_activity(&policy, 1020, false, false);
-    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
-    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
-
-    result = apply_activity(&policy, 1030, false, true);
+    result = apply_activity(&policy, 1320, false, true);
     CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_VIDEO_UPSHIFT);
-    CHECK(policy.high_since_ms == 1030);
-    CHECK(policy.last_activity_ms == 1030);
+    CHECK(policy.high_since_ms == 1320);
+    CHECK(policy.last_activity_ms == 1320);
 
     return 0;
 }
 
 /**
- * @brief Verify that three active graphics samples among five request HIGH.
+ * @brief Verify graphics count and region coverage request HIGH together.
  *
  * @return 0 when the graphics trigger behaves correctly, or -1 on failure.
  */
@@ -287,26 +338,40 @@ static int test_graphics_activity_requests_high(void)
     struct governor_policy policy;
     CHECK(initialize_low_policy(&policy, 2000) == 0);
 
-    static const bool samples[] = {true, false, true, false, true};
     struct governor_policy_result result;
 
-    for (size_t index = 0; index < sizeof(samples) / sizeof(samples[0]); index++) {
-        result = apply_activity(
-            &policy,
-            2010 + (uint64_t)index * 10,
-            samples[index],
-            false);
-
-        if (index < 4) {
-            CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
-            CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
-        }
+    for (unsigned int index = 0; index < 63; index++)
+    {
+        bool active = index < 4
+            || (index >= 32 && index < 36)
+            || index >= 60;
+        result = apply_activity(&policy, 2010 + (uint64_t)index * 10, active, false);
+        CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+        CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
     }
 
+    result = apply_activity(&policy, 2640, true, false);
     CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_GRAPHICS_UPSHIFT);
-    CHECK(policy.high_since_ms == 2050);
-    CHECK(policy.last_activity_ms == 2050);
+    CHECK(policy.high_since_ms == 2640);
+    CHECK(policy.last_activity_ms == 2640);
+
+    return 0;
+}
+
+/** Verify a dense graphics burst confined to one region remains LOW. */
+static int test_rejects_concentrated_graphics_burst(void)
+{
+    struct governor_policy policy;
+    CHECK(initialize_low_policy(&policy, 2700) == 0);
+
+    struct governor_policy_result result;
+    for (unsigned int index = 0; index < 16; index++)
+        result = apply_activity(&policy, 2710 + (uint64_t)index * 10, true, false);
+
+    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    CHECK(policy.graphics_history == UINT64_C(0xffff));
 
     return 0;
 }
@@ -330,6 +395,23 @@ static int test_keeps_activity_histories_separate(void)
     CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
     CHECK((policy.graphics_history & 3U) == 2U);
     CHECK((policy.video_history & 3U) == 1U);
+    CHECK(policy.activity_history_samples == 2);
+
+    return 0;
+}
+
+/** Verify the valid history length grows to 64 samples and then saturates. */
+static int test_counts_valid_history_samples(void)
+{
+    struct governor_policy policy;
+    CHECK(initialize_low_policy(&policy, 4000) == 0);
+
+    for (unsigned int index = 0; index < 80; index++)
+    {
+        apply_activity(&policy, 4010 + (uint64_t)index * 10, false, false);
+        unsigned int expected = index < 64 ? index + 1 : 64;
+        CHECK(policy.activity_history_samples == expected);
+    }
 
     return 0;
 }
@@ -345,27 +427,30 @@ static int test_ignores_activity_outside_trigger_windows(void)
     struct governor_policy video_policy;
     CHECK(initialize_low_policy(&video_policy, 3500) == 0);
 
-    apply_activity(&video_policy, 3510, false, true);
-    apply_activity(&video_policy, 3520, false, false);
-    apply_activity(&video_policy, 3530, false, false);
-    struct governor_policy_result result =
-        apply_activity(&video_policy, 3540, false, true);
+    for (unsigned int index = 0; index < 32; index++)
+    {
+        bool active = index < 7;
+        apply_activity(&video_policy, 3510 + (uint64_t)index * 10, false, active);
+    }
 
-    // The earlier active sample has moved outside the newest three samples.
+    struct governor_policy_result result = apply_activity(&video_policy, 3830, false, true);
+
+    // The oldest of eight active samples has moved outside the newest thirty-two.
     CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
 
     struct governor_policy graphics_policy;
     CHECK(initialize_low_policy(&graphics_policy, 3600) == 0);
 
-    apply_activity(&graphics_policy, 3610, true, false);
-    apply_activity(&graphics_policy, 3620, true, false);
-    apply_activity(&graphics_policy, 3630, false, false);
-    apply_activity(&graphics_policy, 3640, false, false);
-    apply_activity(&graphics_policy, 3650, false, false);
-    result = apply_activity(&graphics_policy, 3660, true, false);
+    for (unsigned int index = 0; index < 64; index++)
+    {
+        bool active = index < 11;
+        apply_activity(&graphics_policy, 3610 + (uint64_t)index * 10, active, false);
+    }
 
-    // Only two active samples remain inside the newest five samples.
+    result = apply_activity(&graphics_policy, 4250, true, false);
+
+    // The oldest of twelve active samples has moved outside the newest sixty-four.
     CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
 
@@ -382,13 +467,16 @@ static int test_reports_simultaneous_activity_triggers(void)
     struct governor_policy policy;
     CHECK(initialize_low_policy(&policy, 4000) == 0);
 
-    apply_activity(&policy, 4010, true, false);
-    apply_activity(&policy, 4020, true, false);
-    apply_activity(&policy, 4030, false, false);
-    apply_activity(&policy, 4040, false, true);
+    for (unsigned int index = 0; index < 47; index++)
+    {
+        bool graphics = index < 4
+            || (index >= 16 && index < 20)
+            || index >= 44;
+        bool video = index >= 40;
+        apply_activity(&policy, 4010 + (uint64_t)index * 10, graphics, video);
+    }
 
-    struct governor_policy_result result =
-        apply_activity(&policy, 4050, true, true);
+    struct governor_policy_result result = apply_activity(&policy, 4480, true, true);
     CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
     CHECK(result.events
           == (GOVERNOR_POLICY_EVENT_GRAPHICS_UPSHIFT
@@ -407,16 +495,17 @@ static int test_does_not_repeat_upshift_events(void)
     struct governor_policy policy;
     CHECK(initialize_low_policy(&policy, 5000) == 0);
 
-    apply_activity(&policy, 5010, false, true);
-    struct governor_policy_result result =
-        apply_activity(&policy, 5020, false, true);
+    for (unsigned int index = 0; index < 7; index++)
+        apply_activity(&policy, 5010 + (uint64_t)index * 10, false, true);
+
+    struct governor_policy_result result = apply_activity(&policy, 5080, false, true);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_VIDEO_UPSHIFT);
 
-    result = apply_activity(&policy, 5030, true, true);
+    result = apply_activity(&policy, 5090, true, true);
     CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
-    CHECK(policy.high_since_ms == 5020);
-    CHECK(policy.last_activity_ms == 5030);
+    CHECK(policy.high_since_ms == 5080);
+    CHECK(policy.last_activity_ms == 5090);
 
     return 0;
 }
@@ -437,16 +526,15 @@ static int test_thermal_limit_blocks_activity_upshift(void)
               TEMPERATURE_MAX_MILLIDEGREES,
               6000) == 0);
 
-    apply_activity(&policy, 6010, true, true);
-    struct governor_policy_result result =
-        apply_activity(&policy, 6020, true, true);
-    result = apply_activity(&policy, 6030, true, true);
+    struct governor_policy_result result;
+    for (unsigned int index = 0; index < 12; index++)
+        result = apply_activity(&policy, 6010 + (uint64_t)index * 10, true, true);
 
     CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
     CHECK(policy.graphics_history != 0);
     CHECK(policy.video_history != 0);
-    CHECK(policy.last_activity_ms == 6030);
+    CHECK(policy.last_activity_ms == 6120);
 
     return 0;
 }
@@ -454,29 +542,37 @@ static int test_thermal_limit_blocks_activity_upshift(void)
 /**
  * @brief Verify idle downshift immediately before and at its time boundary.
  *
- * @return 0 when two seconds of inactivity are required, or -1 on failure.
+ * @return 0 when ten seconds of inactivity are required, or -1 on failure.
  */
 static int test_downshifts_after_continuous_inactivity(void)
 {
     struct governor_policy policy;
     CHECK(initialize_low_policy(&policy, 7000) == 0);
 
-    apply_activity(&policy, 7010, false, true);
-    struct governor_policy_result result =
-        apply_activity(&policy, 7020, false, true);
-    CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
-    CHECK(policy.high_since_ms == 7020);
-    CHECK(policy.last_activity_ms == 7020);
+    for (unsigned int index = 0; index < 7; index++)
+        apply_activity(&policy, 7010 + (uint64_t)index * 10, false, true);
 
-    result = apply_activity(&policy, 9019, false, false);
+    struct governor_policy_result result = apply_activity(&policy, 7080, false, true);
+    CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
+    CHECK(policy.high_since_ms == 7080);
+    CHECK(policy.last_activity_ms == 7080);
+
+    for (unsigned int index = 1; index <= 64; index++)
+    {
+        result = apply_activity(&policy, 7080 + (uint64_t)index * 10, false, false);
+        CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
+        CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    }
+
+    result = apply_activity(&policy, 17079, false, false);
     CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
 
-    result = apply_activity(&policy, 9020, false, false);
+    result = apply_activity(&policy, 17080, false, false);
     CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_IDLE_DOWNSHIFT);
 
-    result = apply_activity(&policy, 9030, false, false);
+    result = apply_activity(&policy, 17090, false, false);
     CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
 
@@ -500,19 +596,19 @@ static int test_activity_resets_inactivity_timer(void)
               10000) == 0);
 
     struct governor_policy_result result =
-        apply_activity(&policy, 11999, false, false);
+        apply_activity(&policy, 19999, false, false);
     CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
 
-    result = apply_activity(&policy, 12000, true, false);
-    CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
-    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
-    CHECK(policy.last_activity_ms == 12000);
-
-    result = apply_activity(&policy, 13999, false, false);
+    result = apply_activity(&policy, 20000, true, false);
     CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    CHECK(policy.last_activity_ms == 20000);
 
-    result = apply_activity(&policy, 14000, false, false);
+    result = apply_activity(&policy, 29999, false, false);
+    CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
+    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+
+    result = apply_activity(&policy, 30000, false, false);
     CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_IDLE_DOWNSHIFT);
 
@@ -536,7 +632,7 @@ static int test_enforces_minimum_high_residency(void)
               15000) == 0);
 
     // Model activity that occurred long before this HIGH residency began.
-    policy.last_activity_ms = 10000;
+    policy.last_activity_ms = 0;
 
     struct governor_policy_result result =
         apply_activity(&policy, 15499, false, false);
@@ -634,18 +730,21 @@ static int test_activity_upshifts_when_thermal_limit_recovers(void)
               TEMPERATURE_MAX_MILLIDEGREES,
               18000) == 0);
 
-    struct governor_policy_result result =
-        apply_activity(&policy, 18010, false, true);
-    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
-    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    struct governor_policy_result result;
+    for (unsigned int index = 0; index < 7; index++)
+    {
+        result = apply_activity(&policy, 18010 + (uint64_t)index * 10, false, true);
+        CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
+        CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
+    }
 
-    result = apply_temperature(&policy, 18020, 91999, false, true);
+    result = apply_temperature(&policy, 18080, 91999, false, true);
     CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
     CHECK(result.events
           == (GOVERNOR_POLICY_EVENT_THERMAL_RECOVERY
               | GOVERNOR_POLICY_EVENT_VIDEO_UPSHIFT));
     CHECK(!policy.thermal_limit_active);
-    CHECK(policy.high_since_ms == 18020);
+    CHECK(policy.high_since_ms == 18080);
 
     return 0;
 }
@@ -739,6 +838,9 @@ static int test_activity_upshifts_when_temperature_fault_recovers(void)
     CHECK(initialize_low_policy(&policy, 28000) == 0);
 
     apply_temperature_failure(&policy, 28010, false, true);
+    for (unsigned int index = 0; index < 5; index++)
+        apply_activity(&policy, 28020 + (uint64_t)index * 10, false, true);
+
     struct governor_policy_result result =
         apply_activity(&policy, 31010, false, true);
     CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
@@ -820,21 +922,28 @@ static int test_recovers_from_thermal_limit_and_temperature_fault(void)
               TEMPERATURE_MAX_MILLIDEGREES,
               36000) == 0);
 
-    apply_temperature_failure(&policy, 36010, true, false);
+    for (unsigned int index = 0; index < 47; index++)
+    {
+        bool graphics = index < 4
+            || (index >= 16 && index < 20)
+            || index >= 44;
+
+        if (index == 0)
+            apply_temperature_failure(&policy, 36010, graphics, false);
+        else
+            apply_activity(&policy, 36010 + (uint64_t)index * 10, graphics, false);
+    }
+
     struct governor_policy_result result =
-        apply_activity(&policy, 39010, true, false);
+        apply_activity(&policy, 39010, false, false);
     CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
     CHECK(result.events == GOVERNOR_POLICY_EVENT_TEMPERATURE_FAULT);
     CHECK(policy.thermal_limit_active);
     CHECK(policy.temperature_fault_active);
 
-    result = apply_activity(&policy, 39020, true, false);
-    CHECK(result.recommended_pstate == GPU_PSTATE_LOW);
-    CHECK(result.events == GOVERNOR_POLICY_EVENT_NONE);
-    CHECK(policy.last_activity_ms == 39020);
     CHECK(policy.graphics_history != 0);
 
-    result = apply_temperature(&policy, 39030, 91999, false, false);
+    result = apply_temperature(&policy, 39020, 91999, true, false);
     CHECK(result.recommended_pstate == GPU_PSTATE_HIGH);
     CHECK(result.events
           == (GOVERNOR_POLICY_EVENT_GRAPHICS_UPSHIFT
@@ -852,11 +961,14 @@ int main(void)
     int failures = 0;
 
     failures += test_initializes_supported_pstates() != 0;
+    failures += test_resolves_initial_medium_from_observations() != 0;
     failures += test_applies_thermal_limit_at_startup() != 0;
     failures += test_rejects_invalid_inputs() != 0;
     failures += test_video_activity_requests_high() != 0;
     failures += test_graphics_activity_requests_high() != 0;
+    failures += test_rejects_concentrated_graphics_burst() != 0;
     failures += test_keeps_activity_histories_separate() != 0;
+    failures += test_counts_valid_history_samples() != 0;
     failures += test_ignores_activity_outside_trigger_windows() != 0;
     failures += test_reports_simultaneous_activity_triggers() != 0;
     failures += test_does_not_repeat_upshift_events() != 0;

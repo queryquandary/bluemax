@@ -93,7 +93,7 @@ LOW   -> 03
 HIGH  -> 0f
 ```
 
-The intermediate `07` state is recognized but is not currently selected by the automatic policy.
+The intermediate `07` state is recognized and retained temporarily when it is active at startup, but it is not selected again after the startup decision. Qualified activity selects HIGH directly, while ten seconds of continuous inactivity selects LOW.
 
 By default, activity is sampled every:
 
@@ -101,16 +101,17 @@ By default, activity is sampled every:
 10 ms
 ```
 
-Two 64-bit rolling histories track graphics and video activity.
+Two 64-bit rolling histories track graphics and video activity. Observation-only event reports include snapshots of both histories, their valid sample count during startup, and the number of active samples in each history. Bit 0 is the newest sample.
 
 The current upshift rules are:
 
 ```text
 Video:
-    2 active samples among the most recent 3
+    8 active samples among the most recent 32
 
 Graphics:
-    3 active samples among the most recent 5
+    12 active samples among the most recent 64
+    activity present in at least 3 of 4 16-sample regions
 ```
 
 These triggers are sample-based. Increasing the activity sampling interval increases workload-trigger latency proportionally.
@@ -124,7 +125,7 @@ minimum HIGH residency: 500 ms
 The GPU returns to LOW only after:
 
 ```text
-2 seconds of continuous inactivity
+10 seconds of continuous inactivity
 ```
 
 Any valid graphics or video activity resets the inactivity timer.
@@ -273,9 +274,9 @@ This is one of the primary reasons BlueMax explicitly monitors the hardware vide
 
 BlueMax is currently under development.
 
-Thermal telemetry, read-only GPU activity telemetry, Nouveau pstate control, the pure governor policy module, validated runtime interval configuration, transactional runtime hardware initialization and cleanup, a single governor sampling cycle, and deterministic sampling deadline bookkeeping are implemented and covered by unit tests using synthetic files and inputs. The tests do not access the real GPU, `/sys`, or debugfs.
+Thermal telemetry, read-only GPU activity telemetry, Nouveau pstate control, the pure governor policy module, validated runtime interval configuration, transactional runtime hardware initialization and cleanup, a governor sampling cycle, deterministic sampling deadline bookkeeping, and continuous absolute-deadline execution are implemented and covered by unit tests using synthetic files and inputs. The tests do not access the real GPU, `/sys`, or debugfs.
 
-The application currently executes one scheduler-controlled sampling cycle, reports its observations and decision, cleans up, and exits. Absolute-deadline sleeping, repeated cycle execution, signal handling, general event reporting, and the systemd service are not yet implemented.
+The application currently runs continuous observation-only governor cycles. It reports meaningful policy events with monotonic timestamps and prints one compact activity-history snapshot per temperature-poll interval, but deliberately suppresses all pstate writes while a Nouveau/Xorg display hang correlated with repeated pstate transitions is investigated. Routine activity samples remain silent. Signal handling, broader event reporting, and the systemd service are not yet implemented.
 
 ## Scope
 
