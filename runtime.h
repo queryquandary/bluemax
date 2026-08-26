@@ -24,6 +24,11 @@ struct runtime_paths {
     const char *bar0_resource_path;
 };
 
+enum {
+    /** Minimum monotonic interval between pstate write attempts. */
+    RUNTIME_PSTATE_TRANSITION_ATTEMPT_INTERVAL_MS = 1000
+};
+
 /** @brief Runtime state and resources owned by the single-threaded governor. */
 struct governor_context {
     /** Validated runtime intervals supplied through the command line. */
@@ -37,6 +42,15 @@ struct governor_context {
 
     /** Last performance state successfully read from or applied to the GPU. */
     enum gpu_pstate applied_pstate;
+
+    /** Whether at least one pstate write has been attempted. */
+    bool has_pstate_transition_attempt;
+
+    /** Monotonic time of the most recent pstate write attempt. */
+    uint64_t last_pstate_transition_attempt_ms;
+
+    /** Target of the most recent pstate write attempt. */
+    enum gpu_pstate last_pstate_transition_attempt_target;
 
     /** Workload and thermal policy state. */
     struct governor_policy policy;
@@ -108,6 +122,9 @@ struct runtime_cycle_result {
     /** Whether this cycle attempted to write a requested pstate. */
     bool pstate_transition_attempted;
 
+    /** Whether an attempt was deferred by the minimum attempt interval. */
+    bool pstate_transition_deferred;
+
     /** Whether a requested pstate transition completed successfully. */
     bool pstate_transition_succeeded;
 
@@ -173,8 +190,9 @@ void runtime_print_startup_summary(FILE *stream, const struct governor_context *
  * @brief Execute one activity, temperature, policy, and pstate cycle.
  *
  * A temperature read failure is returned as a policy observation rather than
- * a cycle failure. A failed pstate transition leaves the retained applied
- * pstate unchanged and publishes the completed cycle result for diagnostics.
+ * a cycle failure. Pstate write attempts are bounded by a fixed monotonic
+ * interval. A failed pstate transition leaves the retained applied pstate
+ * unchanged and publishes the completed cycle result for diagnostics.
  *
  * @param[in,out] context Successfully initialized runtime context.
  * @param[in] paths System paths used for hardware control.
@@ -191,8 +209,9 @@ enum runtime_cycle_status runtime_run_cycle(struct governor_context *context, co
  * @brief Execute one governor cycle without applying pstate recommendations.
  *
  * Hardware telemetry and policy state advance normally, but the pstate file is
- * never opened for writing. Requested transitions are published in @p result
- * with pstate_transition_attempted set to false.
+ * never opened for writing and transition-attempt timing is not consumed.
+ * Requested transitions are published in @p result with
+ * pstate_transition_attempted and pstate_transition_deferred set to false.
  *
  * @param[in,out] context Successfully initialized runtime context.
  * @param[in] paths System paths retained for the common cycle interface.
