@@ -81,14 +81,6 @@ enum runtime_cycle_status {
     RUNTIME_CYCLE_PSTATE_ERROR
 };
 
-/**
- * @brief Return whether the continuous loop may proceed after a cycle failure.
- *
- * Recoverable failures publish a complete cycle result and preserve enough
- * runtime state for a later bounded retry. Programmer errors remain fatal.
- */
-bool runtime_cycle_status_is_recoverable(enum runtime_cycle_status status);
-
 /** @brief Hardware observations and decisions produced by one governor cycle. */
 struct runtime_cycle_result {
     /** Monotonic time associated with this cycle. */
