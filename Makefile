@@ -20,8 +20,10 @@ RUNTIME_TEST_TARGET := $(BUILD_DIR)/test_runtime
 RUNTIME_TEST_SOURCES := tests/test_runtime.c tests/test_helpers.c governor_policy.c gpu_mmio.c gpu_pstate.c runtime.c sampling_schedule.c thermal.c
 SAMPLING_SCHEDULE_TEST_TARGET := $(BUILD_DIR)/test_sampling_schedule
 SAMPLING_SCHEDULE_TEST_SOURCES := tests/test_sampling_schedule.c sampling_schedule.c
-TEST_TARGETS := $(THERMAL_TEST_TARGET) $(GPU_MMIO_TEST_TARGET) $(GPU_PSTATE_TEST_TARGET) $(GOVERNOR_POLICY_TEST_TARGET) $(RUNTIME_CONFIG_TEST_TARGET) $(RUNTIME_TEST_TARGET) $(SAMPLING_SCHEDULE_TEST_TARGET)
-TEST_HEADERS := tests/test_helpers.h governor_policy.h gpu_mmio.h gpu_pstate.h runtime.h runtime_config.h sampling_schedule.h thermal.h
+SHUTDOWN_SIGNAL_TEST_TARGET := $(BUILD_DIR)/test_shutdown_signal
+SHUTDOWN_SIGNAL_TEST_SOURCES := tests/test_shutdown_signal.c shutdown_signal.c
+TEST_TARGETS := $(THERMAL_TEST_TARGET) $(GPU_MMIO_TEST_TARGET) $(GPU_PSTATE_TEST_TARGET) $(GOVERNOR_POLICY_TEST_TARGET) $(RUNTIME_CONFIG_TEST_TARGET) $(RUNTIME_TEST_TARGET) $(SAMPLING_SCHEDULE_TEST_TARGET) $(SHUTDOWN_SIGNAL_TEST_TARGET)
+TEST_HEADERS := tests/test_helpers.h governor_policy.h gpu_mmio.h gpu_pstate.h runtime.h runtime_config.h sampling_schedule.h shutdown_signal.h thermal.h
 
 .PHONY: all bluemax test clean
 
@@ -40,6 +42,7 @@ test: $(TEST_TARGETS)
 	$(RUNTIME_CONFIG_TEST_TARGET)
 	$(RUNTIME_TEST_TARGET)
 	$(SAMPLING_SCHEDULE_TEST_TARGET)
+	$(SHUTDOWN_SIGNAL_TEST_TARGET)
 
 $(THERMAL_TEST_TARGET): $(THERMAL_TEST_SOURCES) $(TEST_HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I. -o $@ $(THERMAL_TEST_SOURCES) $(LDFLAGS) $(LDLIBS)
@@ -61,6 +64,9 @@ $(RUNTIME_TEST_TARGET): $(RUNTIME_TEST_SOURCES) $(TEST_HEADERS) | $(BUILD_DIR)
 
 $(SAMPLING_SCHEDULE_TEST_TARGET): $(SAMPLING_SCHEDULE_TEST_SOURCES) $(TEST_HEADERS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -I. -o $@ $(SAMPLING_SCHEDULE_TEST_SOURCES) $(LDFLAGS) $(LDLIBS)
+
+$(SHUTDOWN_SIGNAL_TEST_TARGET): $(SHUTDOWN_SIGNAL_TEST_SOURCES) $(TEST_HEADERS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -I. -o $@ $(SHUTDOWN_SIGNAL_TEST_SOURCES) $(LDFLAGS) $(LDLIBS)
 
 $(BUILD_DIR):
 	mkdir -p $@
