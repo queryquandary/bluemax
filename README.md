@@ -216,6 +216,8 @@ Missed sampling deadlines are skipped rather than replayed, because historical G
 
 Temperature polling and other slow work piggyback on the main sampling loop rather than requiring additional worker threads or timers.
 
+`SIGINT` and `SIGTERM` request an orderly shutdown. BlueMax leaves the governor loop, unmaps the BAR0 telemetry resource, and exits successfully unless cleanup fails. A signal received during an absolute sleep is handled at the next sampling deadline.
+
 ## Runtime Configuration
 
 BlueMax accepts validated command-line options for the activity sampling and temperature polling intervals:
