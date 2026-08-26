@@ -4,8 +4,8 @@ CFLAGS += -std=c11 -Wall -Wextra -Wpedantic
 
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/bluemax
-SOURCES := bluemax.c governor_policy.c gpu_mmio.c gpu_pstate.c runtime.c runtime_config.c sampling_schedule.c thermal.c
-HEADERS := governor_policy.h gpu_mmio.h gpu_pstate.h runtime.h runtime_config.h sampling_schedule.h thermal.h
+SOURCES := bluemax.c governor_policy.c gpu_mmio.c gpu_pstate.c runtime.c runtime_config.c sampling_schedule.c shutdown_signal.c thermal.c
+HEADERS := governor_policy.h gpu_mmio.h gpu_pstate.h runtime.h runtime_config.h sampling_schedule.h shutdown_signal.h thermal.h
 THERMAL_TEST_TARGET := $(BUILD_DIR)/test_thermal
 THERMAL_TEST_SOURCES := tests/test_thermal.c tests/test_helpers.c thermal.c
 GPU_MMIO_TEST_TARGET := $(BUILD_DIR)/test_gpu_mmio

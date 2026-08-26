@@ -7,6 +7,7 @@
 
 #include "runtime.h"
 #include "runtime_config.h"
+#include "shutdown_signal.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -47,11 +48,21 @@ int main(int argc, char *argv[])
             return COMMAND_LINE_ERROR_EXIT_STATUS;
     }
 
+    if (shutdown_signal_install() == -1)
+    {
+        fprintf(stderr, "%s: cannot install shutdown signal handlers: %s\n", argv[0], strerror(errno));
+        return EXIT_FAILURE;
+    }
+
     struct governor_context context;
     enum runtime_startup_result startup_result = runtime_start(&context, &config, &system_paths);
     if (startup_result != RUNTIME_STARTUP_OK)
     {
         fprintf(stderr, "%s: %s: %s\n", argv[0], runtime_startup_result_description(startup_result), strerror(errno));
+
+        if (shutdown_signal_restore() == -1)
+            fprintf(stderr, "%s: cannot restore shutdown signal handlers: %s\n", argv[0], strerror(errno));
+
         return EXIT_FAILURE;
     }
 
@@ -65,7 +76,7 @@ int main(int argc, char *argv[])
         exit_status = EXIT_FAILURE;
     }
 
-    while (exit_status == EXIT_SUCCESS)
+    while (exit_status == EXIT_SUCCESS && !shutdown_signal_requested())
     {
         if (runtime_sleep_until_ms(context.schedule.next_sample_deadline_ms) == -1)
         {
@@ -73,6 +84,9 @@ int main(int argc, char *argv[])
             exit_status = EXIT_FAILURE;
             break;
         }
+
+        if (shutdown_signal_requested())
+            break;
 
         uint64_t now_ms;
         if (runtime_monotonic_time_ms(&now_ms) == -1)
@@ -138,13 +152,24 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Every path after successful startup reaches cleanup, including clock and
-    // telemetry failures, so the BAR0 mapping is never intentionally retained.
-    if (runtime_cleanup(&context) == -1)
+    // Every path after successful startup reaches cleanup, including signal,
+    // clock, and telemetry exits, so BAR0 is never intentionally retained.
+    bool cleanup_succeeded = runtime_cleanup(&context) == 0;
+    if (!cleanup_succeeded)
     {
         fprintf(stderr, "%s: cannot unmap GPU BAR0 resource: %s\n", argv[0], strerror(errno));
-        return EXIT_FAILURE;
+        exit_status = EXIT_FAILURE;
     }
+
+    bool signals_restored = shutdown_signal_restore() == 0;
+    if (!signals_restored)
+    {
+        fprintf(stderr, "%s: cannot restore shutdown signal handlers: %s\n", argv[0], strerror(errno));
+        exit_status = EXIT_FAILURE;
+    }
+
+    if (!cleanup_succeeded || !signals_restored)
+        return exit_status;
 
     fputs("BAR0 telemetry unmapped\nBlueMax shutdown complete\n", stdout);
     return exit_status;
