@@ -331,6 +331,11 @@ enum runtime_cycle_status runtime_observe_cycle(struct governor_context *context
     return execute_cycle(context, paths, poll_temperature, false, now_ms, result);
 }
 
+bool runtime_cycle_status_is_recoverable(enum runtime_cycle_status status)
+{
+    return status == RUNTIME_CYCLE_PSTATE_ERROR;
+}
+
 /** Count active samples in one 64-bit activity history. */
 static unsigned int history_active_samples(uint64_t history)
 {

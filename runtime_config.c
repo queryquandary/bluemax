@@ -112,21 +112,36 @@ enum runtime_config_parse_result runtime_config_parse(int argc, char *const argv
     struct runtime_config candidate = {
         .sample_interval_ms = RUNTIME_CONFIG_DEFAULT_SAMPLE_INTERVAL_MS,
         .temperature_poll_interval_ms = RUNTIME_CONFIG_DEFAULT_TEMPERATURE_POLL_INTERVAL_MS,
+        .pstate_actuation_enabled = false,
     };
 
     bool sample_seen = false;
     bool temperature_seen = false;
+    bool actuate_seen = false;
 
     for (int index = 1; index < argc; index++)
     {
         const char *option = argv[index];
         bool sample = strcmp(option, "-s") == 0 || strcmp(option, "--sample-interval-ms") == 0;
         bool temperature = strcmp(option, "-t") == 0 || strcmp(option, "--temperature-poll-interval-ms") == 0;
+        bool actuate = strcmp(option, "--actuate") == 0;
 
-        if (!sample && !temperature)
+        if (!sample && !temperature && !actuate)
         {
             const char *description = option[0] == '-' ? "unrecognized option" : "unexpected argument";
             return report_argument_error(error_stream, program_name, description, option);
+        }
+
+        if (actuate)
+        {
+            if (actuate_seen)
+                return report_argument_error(error_stream, program_name, "duplicate option", option);
+
+            // Actuation is deliberately a long-form, valueless opt-in so the
+            // experimental hardware-writing mode cannot be enabled implicitly.
+            actuate_seen = true;
+            candidate.pstate_actuation_enabled = true;
+            continue;
         }
 
         bool *seen = sample ? &sample_seen : &temperature_seen;
@@ -176,6 +191,8 @@ void runtime_config_print_help(FILE *stream, const char *program_name)
     fprintf(stream, "      Activity sampling interval in milliseconds (default %d, range %d-%d).\n", RUNTIME_CONFIG_DEFAULT_SAMPLE_INTERVAL_MS, RUNTIME_CONFIG_MIN_SAMPLE_INTERVAL_MS, RUNTIME_CONFIG_MAX_SAMPLE_INTERVAL_MS);
     fputs("  -t N, --temperature-poll-interval-ms N\n", stream);
     fprintf(stream, "      Temperature polling interval in milliseconds (default %d, range %d-%d).\n", RUNTIME_CONFIG_DEFAULT_TEMPERATURE_POLL_INTERVAL_MS, RUNTIME_CONFIG_MIN_TEMPERATURE_POLL_INTERVAL_MS, RUNTIME_CONFIG_MAX_TEMPERATURE_POLL_INTERVAL_MS);
+    fputs("  --actuate\n", stream);
+    fputs("      Apply policy pstate recommendations (experimental; disabled by default).\n", stream);
     fputs("  -h, --help\n", stream);
     fputs("      Display this help and exit.\n", stream);
     fputs("  -V, --version\n", stream);

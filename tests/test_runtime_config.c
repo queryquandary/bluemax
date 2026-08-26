@@ -57,6 +57,24 @@ static int test_applies_defaults(void)
     CHECK(result == RUNTIME_CONFIG_PARSE_OK);
     CHECK(config.sample_interval_ms == 10);
     CHECK(config.temperature_poll_interval_ms == 1000);
+    CHECK(!config.pstate_actuation_enabled);
+    CHECK(strcmp(diagnostic, "") == 0);
+    return 0;
+}
+
+/** Verify pstate actuation requires the explicit long-form option. */
+static int test_enables_pstate_actuation_explicitly(void)
+{
+    char *argv[] = {"bluemax", "--actuate", "-s", "20"};
+    struct runtime_config config = {0};
+    enum runtime_config_parse_result result;
+    char diagnostic[512];
+
+    CHECK(parse_with_diagnostics(4, argv, &config, &result, diagnostic, sizeof(diagnostic)) == 0);
+    CHECK(result == RUNTIME_CONFIG_PARSE_OK);
+    CHECK(config.sample_interval_ms == 20);
+    CHECK(config.temperature_poll_interval_ms == 1000);
+    CHECK(config.pstate_actuation_enabled);
     CHECK(strcmp(diagnostic, "") == 0);
     return 0;
 }
@@ -119,7 +137,7 @@ static int test_rejects_invalid_values_transactionally(void)
     for (size_t index = 0; index < sizeof(values) / sizeof(values[0]); index++)
     {
         char *argv[] = {"bluemax", "-s", (char *)values[index]};
-        struct runtime_config config = {77, 777};
+        struct runtime_config config = {77, 777, true};
         enum runtime_config_parse_result result;
         char diagnostic[512];
 
@@ -127,18 +145,20 @@ static int test_rejects_invalid_values_transactionally(void)
         CHECK(result == RUNTIME_CONFIG_PARSE_ERROR);
         CHECK(config.sample_interval_ms == 77);
         CHECK(config.temperature_poll_interval_ms == 777);
+        CHECK(config.pstate_actuation_enabled);
         CHECK(strstr(diagnostic, "invalid value") != NULL);
         CHECK(strstr(diagnostic, "--help") != NULL);
     }
 
     char *temperature_argv[] = {"bluemax", "-t", "99"};
-    struct runtime_config config = {77, 777};
+    struct runtime_config config = {77, 777, true};
     enum runtime_config_parse_result result;
     char diagnostic[512];
     CHECK(parse_with_diagnostics(3, temperature_argv, &config, &result, diagnostic, sizeof(diagnostic)) == 0);
     CHECK(result == RUNTIME_CONFIG_PARSE_ERROR);
     CHECK(config.sample_interval_ms == 77);
     CHECK(config.temperature_poll_interval_ms == 777);
+    CHECK(config.pstate_actuation_enabled);
     return 0;
 }
 
@@ -155,7 +175,7 @@ static int test_rejects_unsupported_value_forms(void)
     for (size_t index = 0; index < sizeof(arguments) / sizeof(arguments[0]); index++)
     {
         char *argv[] = {"bluemax", (char *)arguments[index]};
-        struct runtime_config config = {77, 777};
+        struct runtime_config config = {77, 777, true};
         enum runtime_config_parse_result result;
         char diagnostic[512];
 
@@ -172,7 +192,8 @@ static int test_rejects_missing_and_duplicate_options(void)
 {
     char *missing_argv[] = {"bluemax", "--sample-interval-ms"};
     char *duplicate_argv[] = {"bluemax", "-s", "10", "--sample-interval-ms", "20"};
-    struct runtime_config config = {77, 777};
+    char *duplicate_actuate_argv[] = {"bluemax", "--actuate", "--actuate"};
+    struct runtime_config config = {77, 777, true};
     enum runtime_config_parse_result result;
     char diagnostic[512];
 
@@ -184,18 +205,23 @@ static int test_rejects_missing_and_duplicate_options(void)
     CHECK(strstr(diagnostic, "duplicate option") != NULL);
     CHECK(config.sample_interval_ms == 77);
     CHECK(config.temperature_poll_interval_ms == 777);
+    CHECK(parse_with_diagnostics(3, duplicate_actuate_argv, &config, &result, diagnostic, sizeof(diagnostic)) == 0);
+    CHECK(result == RUNTIME_CONFIG_PARSE_ERROR);
+    CHECK(strstr(diagnostic, "duplicate option") != NULL);
+    CHECK(config.sample_interval_ms == 77);
+    CHECK(config.temperature_poll_interval_ms == 777);
     return 0;
 }
 
 /** Verify unknown options, positional arguments, and clusters are rejected. */
 static int test_rejects_unrecognized_arguments(void)
 {
-    static const char *arguments[] = {"--unknown", "unexpected", "-hV"};
+    static const char *arguments[] = {"--unknown", "unexpected", "-hV", "-a"};
 
     for (size_t index = 0; index < sizeof(arguments) / sizeof(arguments[0]); index++)
     {
         char *argv[] = {"bluemax", (char *)arguments[index]};
-        struct runtime_config config = {77, 777};
+        struct runtime_config config = {77, 777, true};
         enum runtime_config_parse_result result;
         char diagnostic[512];
 
@@ -203,6 +229,7 @@ static int test_rejects_unrecognized_arguments(void)
         CHECK(result == RUNTIME_CONFIG_PARSE_ERROR);
         CHECK(config.sample_interval_ms == 77);
         CHECK(config.temperature_poll_interval_ms == 777);
+        CHECK(config.pstate_actuation_enabled);
     }
     return 0;
 }
@@ -211,7 +238,7 @@ static int test_rejects_unrecognized_arguments(void)
 static int test_rejects_incompatible_intervals(void)
 {
     char *argv[] = {"bluemax", "-s", "101", "-t", "100"};
-    struct runtime_config config = {77, 777};
+    struct runtime_config config = {77, 777, true};
     enum runtime_config_parse_result result;
     char diagnostic[512];
 
@@ -239,7 +266,7 @@ static int test_recognizes_help_and_version(void)
     for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++)
     {
         char *argv[] = {"bluemax", (char *)cases[index].option};
-        struct runtime_config config = {77, 777};
+        struct runtime_config config = {77, 777, true};
         enum runtime_config_parse_result result;
         char diagnostic[512];
 
@@ -251,7 +278,7 @@ static int test_recognizes_help_and_version(void)
     }
 
     char *mixed_argv[] = {"bluemax", "-s", "10", "--version"};
-    struct runtime_config config = {77, 777};
+    struct runtime_config config = {77, 777, true};
     enum runtime_config_parse_result result;
     char diagnostic[512];
     CHECK(parse_with_diagnostics(4, mixed_argv, &config, &result, diagnostic, sizeof(diagnostic)) == 0);
@@ -279,6 +306,8 @@ static int test_prints_help_and_version(void)
     CHECK(strstr(output, "Usage: bluemax [OPTIONS]") != NULL);
     CHECK(strstr(output, "-s N, --sample-interval-ms N") != NULL);
     CHECK(strstr(output, "-t N, --temperature-poll-interval-ms N") != NULL);
+    CHECK(strstr(output, "--actuate") != NULL);
+    CHECK(strstr(output, "experimental; disabled by default") != NULL);
     CHECK(strstr(output, "sample-based") != NULL);
     CHECK(strstr(output, "BlueMax 0.1.0\n") != NULL);
     return 0;
@@ -291,6 +320,7 @@ int main(void)
         int (*run)(void);
     } tests[] = {
         {"applies defaults", test_applies_defaults},
+        {"enables pstate actuation explicitly", test_enables_pstate_actuation_explicitly},
         {"accepts short and long options", test_accepts_short_and_long_options},
         {"accepts interval boundaries", test_accepts_interval_boundaries},
         {"rejects invalid values transactionally", test_rejects_invalid_values_transactionally},
