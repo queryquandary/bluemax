@@ -200,6 +200,8 @@ The pstate file is opened only when a transition is required and closed immediat
 
 The runtime permits the first required transition immediately, then enforces at least one second between pstate write attempts. This bounds retries after a failed write and prevents an ordinary target change from producing another write inside the interval. A newly requested thermal-safety or temperature-telemetry-fault transition to LOW may bypass a previous non-LOW attempt, but retries after a failed safety write remain bounded by the same interval.
 
+Continuous pstate actuation is experimental and must be enabled explicitly with `--actuate`. Observation-only operation remains the default while the active mode is validated on the target hardware. A failed write retains the last known applied pstate, is reported as a recoverable error, and permits a later bounded retry without stopping the sampling loop.
+
 BlueMax does not continuously poll the pstate interface.
 
 ## Execution Model
@@ -227,11 +229,14 @@ BlueMax accepts validated command-line options for the activity sampling and tem
 ```text
 -s N    --sample-interval-ms N
 -t N    --temperature-poll-interval-ms N
+        --actuate
 -h      --help
 -V      --version
 ```
 
 Options taking a value require that value as the next command-line argument. Attached values such as `-s20` and equals-sign forms such as `--sample-interval-ms=20` are not accepted.
+
+`--actuate` takes no value and explicitly enables experimental pstate writes. Without it, BlueMax observes hardware activity and policy decisions but suppresses all pstate transitions.
 
 The supported intervals are:
 
@@ -280,7 +285,7 @@ BlueMax is currently under development.
 
 Thermal telemetry, read-only GPU activity telemetry, Nouveau pstate control, bounded pstate transition attempts, the pure governor policy module, validated runtime interval configuration, transactional runtime hardware initialization and cleanup, a governor sampling cycle, deterministic sampling deadline bookkeeping, continuous absolute-deadline execution, and orderly signal handling are implemented and covered by unit tests using synthetic files and inputs. The tests do not access the real GPU, `/sys`, or debugfs.
 
-The application currently runs continuous observation-only governor cycles. It reports meaningful policy events with monotonic timestamps and prints one compact activity-history snapshot per temperature-poll interval, but deliberately suppresses all pstate writes while a Nouveau/Xorg display hang correlated with repeated pstate transitions is investigated. Routine activity samples remain silent. Broader event reporting and the systemd service are not yet implemented.
+The application runs continuous observation-only governor cycles by default. Experimental bounded pstate actuation can be enabled explicitly with `--actuate` for controlled hardware validation. It reports meaningful policy events and every pstate write outcome with monotonic timestamps, and prints one compact activity-history snapshot per temperature-poll interval. Failed writes are recoverable and remain subject to the one-second attempt interval. Routine activity samples remain silent. Broader event reporting and the systemd service are not yet implemented.
 
 ## Scope
 

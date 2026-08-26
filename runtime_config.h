@@ -1,6 +1,7 @@
 #ifndef BLUEMAX_RUNTIME_CONFIG_H
 #define BLUEMAX_RUNTIME_CONFIG_H
 
+#include <stdbool.h>
 #include <stdio.h>
 
 /** @brief Current BlueMax release version. */
@@ -15,13 +16,16 @@ enum {
     RUNTIME_CONFIG_MAX_TEMPERATURE_POLL_INTERVAL_MS = 1000
 };
 
-/** @brief Validated settings controlling runtime polling intervals. */
+/** @brief Validated settings controlling governor runtime behavior. */
 struct runtime_config {
     /** Interval between GPU activity samples. */
     unsigned int sample_interval_ms;
 
     /** Interval between scheduled temperature reads. */
     unsigned int temperature_poll_interval_ms;
+
+    /** Whether policy recommendations may be applied to the GPU. */
+    bool pstate_actuation_enabled;
 };
 
 /** @brief Outcomes that determine the application command-line path. */

@@ -213,7 +213,7 @@ static int test_prints_startup_summary(void)
     }
 
     int result = 0;
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct governor_context context = {0};
     FILE *stream = NULL;
     char summary[2048];
@@ -274,7 +274,7 @@ static int test_initializes_supported_pstates(void)
     }
 
     int result = 0;
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct governor_context context = {0};
 
     for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++)
@@ -305,7 +305,7 @@ static int test_initial_temperature_applies_thermal_limit(void)
     }
 
     int result = 0;
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct governor_context context = {0};
     char pstate_contents[128];
 
@@ -350,7 +350,7 @@ static int test_cycle_classifies_activity(void)
     }
 
     int result = 0;
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct governor_context context = {0};
     struct runtime_cycle_result cycle;
 
@@ -398,7 +398,7 @@ static int test_cycle_processes_temperature_reads(void)
     }
 
     int result = 0;
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct governor_context context = {0};
     struct runtime_cycle_result cycle;
 
@@ -439,7 +439,7 @@ static int test_cycle_applies_only_required_pstate_transition(void)
     }
 
     int result = 0;
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct governor_context context = {0};
     struct runtime_cycle_result cycle;
     char command[16];
@@ -490,7 +490,7 @@ static int test_cycle_retries_failed_pstate_transition(void)
     }
 
     int result = 0;
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct governor_context context = {0};
     struct runtime_cycle_result cycle;
     const struct gpu_activity_sample graphics_activity = {.pgraph = 1};
@@ -528,6 +528,9 @@ static int test_cycle_retries_failed_pstate_transition(void)
     CHECK(context.has_pstate_transition_attempt);
     CHECK(context.last_pstate_transition_attempt_ms == initial_ms + 640);
     CHECK(context.last_pstate_transition_attempt_target == GPU_PSTATE_HIGH);
+
+    CHECK(sampling_schedule_complete(&context.schedule, &context.config, initial_ms + 645, false) == 0);
+    CHECK(context.schedule.next_sample_deadline_ms == initial_ms + 650);
 
     CHECK(test_write_text(fixture.root, "pstate", "") == 0);
     CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + 650, &cycle) == RUNTIME_CYCLE_OK);
@@ -570,7 +573,7 @@ static int test_cycle_defers_changed_workload_target(void)
     }
 
     int result = 0;
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct governor_context context = {0};
     struct runtime_cycle_result cycle;
     const struct gpu_activity_sample video_activity = {.pvld = 1};
@@ -614,7 +617,7 @@ static int test_cycle_bounds_thermal_safety_retry(void)
     }
 
     int result = 0;
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct governor_context context = {0};
     struct runtime_cycle_result cycle;
     const struct gpu_activity_sample video_activity = {.pvld = 1};
@@ -681,7 +684,7 @@ static int test_cycle_handles_attempt_interval_timestamp_boundary(void)
     }
 
     int result = 0;
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct governor_context context = {0};
     struct runtime_cycle_result cycle;
 
@@ -726,7 +729,7 @@ static int test_cycle_suppresses_pstate_transition(void)
     }
 
     int result = 0;
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct governor_context context = {0};
     struct runtime_cycle_result cycle;
 
@@ -837,6 +840,19 @@ static int test_prints_cycle_summary(void)
     summary[received] = '\0';
     CHECK(strstr(summary, "Pstate transition:         deferred (attempt interval)") != NULL);
 
+    cycle.pstate_transition_deferred = false;
+    cycle.pstate_transition_attempted = true;
+    CHECK(ftruncate(fileno(stream), 0) == 0);
+    rewind(stream);
+    runtime_print_cycle_summary(stream, &cycle);
+    CHECK(fflush(stream) == 0);
+    CHECK(fseek(stream, 0, SEEK_SET) == 0);
+
+    received = fread(summary, 1, sizeof(summary) - 1, stream);
+    CHECK(!ferror(stream));
+    summary[received] = '\0';
+    CHECK(strstr(summary, "Pstate transition:         failed") != NULL);
+
 cleanup:
     if (stream != NULL)
         fclose(stream);
@@ -908,7 +924,7 @@ static int test_reports_hardware_failures_transactionally(void)
     }
 
     int result = 0;
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct governor_context context;
     struct governor_context unchanged;
 
@@ -968,7 +984,7 @@ static int test_rejects_invalid_arguments(void)
 {
     int result = 0;
     struct governor_context context = {0};
-    struct runtime_config config = {10, 1000};
+    struct runtime_config config = {10, 1000, false};
     struct runtime_paths paths = {"hwmon", "pstate", "resource0"};
     struct runtime_cycle_result cycle;
 
@@ -1026,6 +1042,19 @@ cleanup:
     return result;
 }
 
+/** Verify only pstate write failures permit continuous-loop recovery. */
+static int test_classifies_recoverable_cycle_status(void)
+{
+    int result = 0;
+
+    CHECK(!runtime_cycle_status_is_recoverable(RUNTIME_CYCLE_OK));
+    CHECK(!runtime_cycle_status_is_recoverable(RUNTIME_CYCLE_INVALID_ARGUMENT));
+    CHECK(runtime_cycle_status_is_recoverable(RUNTIME_CYCLE_PSTATE_ERROR));
+
+cleanup:
+    return result;
+}
+
 int main(void)
 {
     static const struct {
@@ -1049,6 +1078,7 @@ int main(void)
         {"reports hardware failures transactionally", test_reports_hardware_failures_transactionally},
         {"sleeps until absolute deadline", test_sleeps_until_absolute_deadline},
         {"rejects invalid arguments", test_rejects_invalid_arguments},
+        {"classifies recoverable cycle status", test_classifies_recoverable_cycle_status},
     };
 
     int failures = 0;

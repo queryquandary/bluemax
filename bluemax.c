@@ -67,7 +67,7 @@ int main(int argc, char *argv[])
     }
 
     runtime_print_startup_summary(stdout, &context);
-    fputs("Pstate actuation:          disabled (observation only)\n\n", stdout);
+    fprintf(stdout, "Pstate actuation:          %s\n\n", config.pstate_actuation_enabled ? "enabled (experimental)" : "disabled (observation only)");
 
     int exit_status = EXIT_SUCCESS;
     if (fflush(stdout) == EOF)
@@ -108,17 +108,35 @@ int main(int argc, char *argv[])
         }
 
         struct runtime_cycle_result cycle;
-        enum runtime_cycle_status cycle_status = runtime_observe_cycle(&context, &system_paths, poll_temperature, now_ms, &cycle);
-        if (cycle_status != RUNTIME_CYCLE_OK)
+        enum runtime_cycle_status cycle_status;
+
+        // Observation remains the safe default. Only the explicit command-line
+        // opt-in selects the path that may write Nouveau's pstate interface.
+        if (config.pstate_actuation_enabled)
+            cycle_status = runtime_run_cycle(&context, &system_paths, poll_temperature, now_ms, &cycle);
+        else
+            cycle_status = runtime_observe_cycle(&context, &system_paths, poll_temperature, now_ms, &cycle);
+
+        // Reporting and clock calls can overwrite errno, so retain the hardware
+        // failure before doing any work with the published cycle result.
+        int cycle_error = cycle_status == RUNTIME_CYCLE_OK ? 0 : errno;
+
+        // A pstate write failure leaves the prior applied state intact and
+        // consumes the retry interval. Continue so the schedule advances and
+        // the runtime can make a later bounded attempt.
+        if (cycle_status != RUNTIME_CYCLE_OK && !runtime_cycle_status_is_recoverable(cycle_status))
         {
-            fprintf(stderr, "%s: cannot execute governor cycle: %s\n", argv[0], strerror(errno));
+            fprintf(stderr, "%s: cannot execute governor cycle: %s\n", argv[0], strerror(cycle_error));
             exit_status = EXIT_FAILURE;
             break;
         }
 
-        bool report_written = cycle.policy.events != GOVERNOR_POLICY_EVENT_NONE || poll_temperature;
+        // Attempt outcomes must remain visible during hardware validation even
+        // when the policy target itself did not change on this retry cycle.
+        bool detailed_report = cycle.policy.events != GOVERNOR_POLICY_EVENT_NONE || cycle.pstate_transition_attempted;
+        bool report_written = detailed_report || poll_temperature;
 
-        if (cycle.policy.events != GOVERNOR_POLICY_EVENT_NONE)
+        if (detailed_report)
             runtime_print_cycle_summary(stdout, &cycle);
         else if (poll_temperature)
             runtime_print_observation_summary(stdout, &cycle);
@@ -132,6 +150,9 @@ int main(int argc, char *argv[])
                 break;
             }
         }
+
+        if (cycle_status == RUNTIME_CYCLE_PSTATE_ERROR)
+            fprintf(stderr, "%s: cannot apply requested GPU pstate: %s; continuing with bounded retries\n", argv[0], strerror(cycle_error));
 
         // Advance from time measured after MMIO, temperature, policy, and
         // pstate work. A slow cycle therefore skips deadlines consumed while
