@@ -198,6 +198,8 @@ Pstate changes are made through Nouveau's debugfs interface:
 
 The pstate file is opened only when a transition is required and closed immediately afterward.
 
+The runtime permits the first required transition immediately, then enforces at least one second between pstate write attempts. This bounds retries after a failed write and prevents an ordinary target change from producing another write inside the interval. A newly requested thermal-safety or temperature-telemetry-fault transition to LOW may bypass a previous non-LOW attempt, but retries after a failed safety write remain bounded by the same interval.
+
 BlueMax does not continuously poll the pstate interface.
 
 ## Execution Model
@@ -276,9 +278,9 @@ This is one of the primary reasons BlueMax explicitly monitors the hardware vide
 
 BlueMax is currently under development.
 
-Thermal telemetry, read-only GPU activity telemetry, Nouveau pstate control, the pure governor policy module, validated runtime interval configuration, transactional runtime hardware initialization and cleanup, a governor sampling cycle, deterministic sampling deadline bookkeeping, and continuous absolute-deadline execution are implemented and covered by unit tests using synthetic files and inputs. The tests do not access the real GPU, `/sys`, or debugfs.
+Thermal telemetry, read-only GPU activity telemetry, Nouveau pstate control, bounded pstate transition attempts, the pure governor policy module, validated runtime interval configuration, transactional runtime hardware initialization and cleanup, a governor sampling cycle, deterministic sampling deadline bookkeeping, continuous absolute-deadline execution, and orderly signal handling are implemented and covered by unit tests using synthetic files and inputs. The tests do not access the real GPU, `/sys`, or debugfs.
 
-The application currently runs continuous observation-only governor cycles. It reports meaningful policy events with monotonic timestamps and prints one compact activity-history snapshot per temperature-poll interval, but deliberately suppresses all pstate writes while a Nouveau/Xorg display hang correlated with repeated pstate transitions is investigated. Routine activity samples remain silent. Signal handling, broader event reporting, and the systemd service are not yet implemented.
+The application currently runs continuous observation-only governor cycles. It reports meaningful policy events with monotonic timestamps and prints one compact activity-history snapshot per temperature-poll interval, but deliberately suppresses all pstate writes while a Nouveau/Xorg display hang correlated with repeated pstate transitions is investigated. Routine activity samples remain silent. Broader event reporting and the systemd service are not yet implemented.
 
 ## Scope
 

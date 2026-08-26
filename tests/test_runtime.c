@@ -169,6 +169,7 @@ static int test_initializes_and_cleans_up_runtime(void)
     CHECK(context.policy.last_activity_ms >= earliest_ms);
     CHECK(context.policy.last_activity_ms <= latest_ms);
     CHECK(context.policy.high_since_ms == context.policy.last_activity_ms);
+    CHECK(!context.has_pstate_transition_attempt);
 
     // Policy and scheduling startup share one timestamp. Temperature waits a
     // full configured interval because discovery already supplied a valid read.
@@ -478,7 +479,7 @@ cleanup:
     return result;
 }
 
-/** Verify a failed workload upshift remains eligible for retry. */
+/** Verify a failed workload upshift retries only after the attempt interval. */
 static int test_cycle_retries_failed_pstate_transition(void)
 {
     struct runtime_fixture fixture;
@@ -524,17 +525,187 @@ static int test_cycle_retries_failed_pstate_transition(void)
     CHECK(cycle.applied_pstate == GPU_PSTATE_LOW);
     CHECK(context.applied_pstate == GPU_PSTATE_LOW);
     CHECK(context.policy.target_pstate == GPU_PSTATE_HIGH);
+    CHECK(context.has_pstate_transition_attempt);
+    CHECK(context.last_pstate_transition_attempt_ms == initial_ms + 640);
+    CHECK(context.last_pstate_transition_attempt_target == GPU_PSTATE_HIGH);
 
     CHECK(test_write_text(fixture.root, "pstate", "") == 0);
     CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + 650, &cycle) == RUNTIME_CYCLE_OK);
     CHECK(cycle.policy.recommended_pstate == GPU_PSTATE_HIGH);
     CHECK(cycle.policy.events == GOVERNOR_POLICY_EVENT_NONE);
     CHECK(cycle.pstate_transition_requested);
+    CHECK(cycle.pstate_transition_deferred);
+    CHECK(!cycle.pstate_transition_attempted);
+    CHECK(!cycle.pstate_transition_succeeded);
+    CHECK(context.applied_pstate == GPU_PSTATE_LOW);
+    CHECK(test_read_text(fixture.root, "pstate", command, sizeof(command)) == 0);
+    CHECK(strcmp(command, "") == 0);
+
+    CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + 1640, &cycle) == RUNTIME_CYCLE_OK);
+    CHECK(cycle.policy.recommended_pstate == GPU_PSTATE_HIGH);
+    CHECK(cycle.pstate_transition_requested);
+    CHECK(!cycle.pstate_transition_deferred);
     CHECK(cycle.pstate_transition_attempted);
     CHECK(cycle.pstate_transition_succeeded);
     CHECK(context.applied_pstate == GPU_PSTATE_HIGH);
     CHECK(test_read_text(fixture.root, "pstate", command, sizeof(command)) == 0);
     CHECK(strcmp(command, "0f\n") == 0);
+
+cleanup:
+    if (context.gpu.bar0_address != NULL)
+        runtime_cleanup(&context);
+
+    fixture_destroy(&fixture);
+    return result;
+}
+
+/** Verify an ordinary target change does not bypass the attempt interval. */
+static int test_cycle_defers_changed_workload_target(void)
+{
+    struct runtime_fixture fixture;
+    if (fixture_create(&fixture) == -1)
+    {
+        perror("fixture_create");
+        return -1;
+    }
+
+    int result = 0;
+    struct runtime_config config = {10, 1000};
+    struct governor_context context = {0};
+    struct runtime_cycle_result cycle;
+    const struct gpu_activity_sample video_activity = {.pvld = 1};
+
+    CHECK(runtime_start(&context, &config, &fixture.paths) == RUNTIME_STARTUP_OK);
+    uint64_t initial_ms = context.policy.last_activity_ms;
+
+    // Model a recent LOW attempt, then seed seven video samples so this cycle
+    // changes the ordinary workload target to HIGH without 70 setup cycles.
+    context.has_pstate_transition_attempt = true;
+    context.last_pstate_transition_attempt_ms = initial_ms + 100;
+    context.last_pstate_transition_attempt_target = GPU_PSTATE_LOW;
+    context.policy.video_history = UINT64_C(0x7f);
+    context.policy.activity_history_samples = 7;
+
+    CHECK(fixture_write_activity(&fixture, &video_activity) == 0);
+    CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + 110, &cycle) == RUNTIME_CYCLE_OK);
+    CHECK(cycle.policy.recommended_pstate == GPU_PSTATE_HIGH);
+    CHECK((cycle.policy.events & GOVERNOR_POLICY_EVENT_VIDEO_UPSHIFT) != 0);
+    CHECK(cycle.pstate_transition_requested);
+    CHECK(cycle.pstate_transition_deferred);
+    CHECK(!cycle.pstate_transition_attempted);
+    CHECK(context.applied_pstate == GPU_PSTATE_LOW);
+
+cleanup:
+    if (context.gpu.bar0_address != NULL)
+        runtime_cleanup(&context);
+
+    fixture_destroy(&fixture);
+    return result;
+}
+
+/** Verify safety LOW bypasses another target but bounds its own failed retry. */
+static int test_cycle_bounds_thermal_safety_retry(void)
+{
+    struct runtime_fixture fixture;
+    if (fixture_create(&fixture) == -1)
+    {
+        perror("fixture_create");
+        return -1;
+    }
+
+    int result = 0;
+    struct runtime_config config = {10, 1000};
+    struct governor_context context = {0};
+    struct runtime_cycle_result cycle;
+    const struct gpu_activity_sample video_activity = {.pvld = 1};
+    char command[16];
+
+    CHECK(runtime_start(&context, &config, &fixture.paths) == RUNTIME_STARTUP_OK);
+    uint64_t initial_ms = context.policy.last_activity_ms;
+
+    // Establish a recent successful HIGH attempt through the normal policy so
+    // the following thermal LOW request occurs inside the attempt interval.
+    CHECK(fixture_write_activity(&fixture, &video_activity) == 0);
+    for (unsigned int index = 1; index <= 8; index++)
+        CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + (uint64_t)index * 10, &cycle) == RUNTIME_CYCLE_OK);
+
+    CHECK(context.applied_pstate == GPU_PSTATE_HIGH);
+    CHECK(context.last_pstate_transition_attempt_ms == initial_ms + 80);
+    CHECK(context.last_pstate_transition_attempt_target == GPU_PSTATE_HIGH);
+
+    CHECK(test_write_text(fixture.hwmon_device, "temp1_input", "95000\n") == 0);
+    test_remove_file(fixture.root, "pstate");
+    errno = 0;
+    CHECK(runtime_run_cycle(&context, &fixture.paths, true, initial_ms + 90, &cycle) == RUNTIME_CYCLE_PSTATE_ERROR);
+    CHECK(errno == ENOENT);
+    CHECK(context.policy.thermal_limit_active);
+    CHECK(cycle.policy.recommended_pstate == GPU_PSTATE_LOW);
+    CHECK(cycle.pstate_transition_attempted);
+    CHECK(!cycle.pstate_transition_deferred);
+    CHECK(!cycle.pstate_transition_succeeded);
+    CHECK(context.applied_pstate == GPU_PSTATE_HIGH);
+    CHECK(context.last_pstate_transition_attempt_target == GPU_PSTATE_LOW);
+
+    CHECK(test_write_text(fixture.root, "pstate", "") == 0);
+    CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + 100, &cycle) == RUNTIME_CYCLE_OK);
+    CHECK(cycle.pstate_transition_requested);
+    CHECK(cycle.pstate_transition_deferred);
+    CHECK(!cycle.pstate_transition_attempted);
+    CHECK(context.applied_pstate == GPU_PSTATE_HIGH);
+
+    CHECK(runtime_run_cycle(&context, &fixture.paths, false, initial_ms + 1090, &cycle) == RUNTIME_CYCLE_OK);
+    CHECK(cycle.pstate_transition_requested);
+    CHECK(!cycle.pstate_transition_deferred);
+    CHECK(cycle.pstate_transition_attempted);
+    CHECK(cycle.pstate_transition_succeeded);
+    CHECK(context.applied_pstate == GPU_PSTATE_LOW);
+    CHECK(test_read_text(fixture.root, "pstate", command, sizeof(command)) == 0);
+    CHECK(strcmp(command, "03\n") == 0);
+
+cleanup:
+    if (context.gpu.bar0_address != NULL)
+        runtime_cleanup(&context);
+
+    fixture_destroy(&fixture);
+    return result;
+}
+
+/** Verify interval arithmetic remains exact at the uint64_t upper boundary. */
+static int test_cycle_handles_attempt_interval_timestamp_boundary(void)
+{
+    struct runtime_fixture fixture;
+    if (fixture_create(&fixture) == -1)
+    {
+        perror("fixture_create");
+        return -1;
+    }
+
+    int result = 0;
+    struct runtime_config config = {10, 1000};
+    struct governor_context context = {0};
+    struct runtime_cycle_result cycle;
+
+    CHECK(runtime_start(&context, &config, &fixture.paths) == RUNTIME_STARTUP_OK);
+
+    // The applied-state override creates a pending LOW request without needing
+    // timestamp addition near UINT64_MAX, which is the behavior under test.
+    context.applied_pstate = GPU_PSTATE_HIGH;
+    context.has_pstate_transition_attempt = true;
+    context.last_pstate_transition_attempt_target = GPU_PSTATE_HIGH;
+    context.last_pstate_transition_attempt_ms = UINT64_MAX - (RUNTIME_PSTATE_TRANSITION_ATTEMPT_INTERVAL_MS - 1U);
+
+    CHECK(runtime_run_cycle(&context, &fixture.paths, false, UINT64_MAX, &cycle) == RUNTIME_CYCLE_OK);
+    CHECK(cycle.pstate_transition_requested);
+    CHECK(cycle.pstate_transition_deferred);
+    CHECK(!cycle.pstate_transition_attempted);
+
+    context.last_pstate_transition_attempt_ms = UINT64_MAX - RUNTIME_PSTATE_TRANSITION_ATTEMPT_INTERVAL_MS;
+    CHECK(test_write_text(fixture.root, "pstate", "") == 0);
+    CHECK(runtime_run_cycle(&context, &fixture.paths, false, UINT64_MAX, &cycle) == RUNTIME_CYCLE_OK);
+    CHECK(cycle.pstate_transition_requested);
+    CHECK(!cycle.pstate_transition_deferred);
+    CHECK(cycle.pstate_transition_attempted);
+    CHECK(cycle.pstate_transition_succeeded);
 
 cleanup:
     if (context.gpu.bar0_address != NULL)
@@ -568,12 +739,23 @@ static int test_cycle_suppresses_pstate_transition(void)
     CHECK(runtime_observe_cycle(&context, &fixture.paths, false, context.policy.last_activity_ms + 10000, &cycle) == RUNTIME_CYCLE_OK);
     CHECK(cycle.pstate_transition_requested);
     CHECK(!cycle.pstate_transition_attempted);
+    CHECK(!cycle.pstate_transition_deferred);
     CHECK(!cycle.pstate_transition_succeeded);
     CHECK(cycle.policy.recommended_pstate == GPU_PSTATE_LOW);
     CHECK(cycle.applied_pstate == GPU_PSTATE_MEDIUM);
     CHECK(context.applied_pstate == GPU_PSTATE_MEDIUM);
     CHECK(access(fixture.pstate_path, F_OK) == -1);
     CHECK(errno == ENOENT);
+
+    // Observation did not consume the first attempt, so actuation at the same
+    // timestamp remains immediately eligible.
+    CHECK(test_write_text(fixture.root, "pstate", "") == 0);
+    CHECK(runtime_run_cycle(&context, &fixture.paths, false, context.policy.last_activity_ms + 10000, &cycle) == RUNTIME_CYCLE_OK);
+    CHECK(cycle.pstate_transition_requested);
+    CHECK(!cycle.pstate_transition_deferred);
+    CHECK(cycle.pstate_transition_attempted);
+    CHECK(cycle.pstate_transition_succeeded);
+    CHECK(context.applied_pstate == GPU_PSTATE_LOW);
 
 cleanup:
     if (context.gpu.bar0_address != NULL)
@@ -642,6 +824,18 @@ static int test_prints_cycle_summary(void)
     CHECK(!ferror(stream));
     summary[received] = '\0';
     CHECK(strstr(summary, "Pstate transition:         suppressed (observation only)") != NULL);
+
+    cycle.pstate_transition_deferred = true;
+    CHECK(ftruncate(fileno(stream), 0) == 0);
+    rewind(stream);
+    runtime_print_cycle_summary(stream, &cycle);
+    CHECK(fflush(stream) == 0);
+    CHECK(fseek(stream, 0, SEEK_SET) == 0);
+
+    received = fread(summary, 1, sizeof(summary) - 1, stream);
+    CHECK(!ferror(stream));
+    summary[received] = '\0';
+    CHECK(strstr(summary, "Pstate transition:         deferred (attempt interval)") != NULL);
 
 cleanup:
     if (stream != NULL)
@@ -846,6 +1040,9 @@ int main(void)
         {"cycle processes temperature reads", test_cycle_processes_temperature_reads},
         {"cycle applies only required transition", test_cycle_applies_only_required_pstate_transition},
         {"cycle retries failed transition", test_cycle_retries_failed_pstate_transition},
+        {"cycle defers changed workload target", test_cycle_defers_changed_workload_target},
+        {"cycle bounds thermal safety retry", test_cycle_bounds_thermal_safety_retry},
+        {"cycle handles attempt timestamp boundary", test_cycle_handles_attempt_interval_timestamp_boundary},
         {"cycle suppresses pstate transition", test_cycle_suppresses_pstate_transition},
         {"prints cycle summary", test_prints_cycle_summary},
         {"prints observation summary", test_prints_observation_summary},

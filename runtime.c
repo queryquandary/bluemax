@@ -195,6 +195,32 @@ void runtime_print_startup_summary(FILE *stream, const struct governor_context *
     fprintf(stream, "BAR0 telemetry:            mapped read-only (%zu MiB)\n\n", context->gpu.bar0_length / (1024U * 1024U));
 }
 
+/** Return whether the minimum interval has elapsed without overflowing. */
+static bool pstate_attempt_interval_elapsed(const struct governor_context *context, uint64_t now_ms)
+{
+    // Subtraction is safe only after ordering the monotonic timestamps. This
+    // also treats an unexpected clock regression as ineligible for a retry.
+    return now_ms >= context->last_pstate_transition_attempt_ms
+        && now_ms - context->last_pstate_transition_attempt_ms >= RUNTIME_PSTATE_TRANSITION_ATTEMPT_INTERVAL_MS;
+}
+
+/** Return whether a requested transition may write the pstate interface. */
+static bool pstate_transition_attempt_allowed(const struct governor_context *context, enum gpu_pstate target, uint64_t now_ms)
+{
+    if (!context->has_pstate_transition_attempt)
+        return true;
+
+    bool safety_low = target == GPU_PSTATE_LOW && (context->policy.thermal_limit_active || context->policy.temperature_fault_active);
+
+    // A newly requested safety downshift must not wait behind an earlier HIGH
+    // or MEDIUM attempt. Once LOW itself has been attempted, however, the
+    // normal interval bounds retries of a persistently failing safety write.
+    if (safety_low && context->last_pstate_transition_attempt_target != GPU_PSTATE_LOW)
+        return true;
+
+    return pstate_attempt_interval_elapsed(context, now_ms);
+}
+
 /** Execute one cycle with hardware actuation either enabled or suppressed. */
 static enum runtime_cycle_status execute_cycle(struct governor_context *context, const struct runtime_paths *paths, bool poll_temperature, bool apply_pstate, uint64_t now_ms, struct runtime_cycle_result *result)
 {
@@ -259,6 +285,20 @@ static enum runtime_cycle_status execute_cycle(struct governor_context *context,
 
     if (cycle.pstate_transition_requested && apply_pstate)
     {
+        if (!pstate_transition_attempt_allowed(context, cycle.policy.recommended_pstate, now_ms))
+        {
+            cycle.pstate_transition_deferred = true;
+            cycle.applied_pstate = context->applied_pstate;
+            *result = cycle;
+            return RUNTIME_CYCLE_OK;
+        }
+
+        // Record eligibility consumption before writing. Failed writes must be
+        // bounded just like successful ones or a persistent error could cause
+        // an attempt on every activity-sampling cycle.
+        context->has_pstate_transition_attempt = true;
+        context->last_pstate_transition_attempt_ms = now_ms;
+        context->last_pstate_transition_attempt_target = cycle.policy.recommended_pstate;
         cycle.pstate_transition_attempted = true;
 
         if (gpu_pstate_set(paths->pstate_path, cycle.policy.recommended_pstate) == -1)
@@ -334,6 +374,8 @@ void runtime_print_cycle_summary(FILE *stream, const struct runtime_cycle_result
 
     if (!result->pstate_transition_requested)
         fprintf(stream, "Pstate transition:         not required\n");
+    else if (result->pstate_transition_deferred)
+        fprintf(stream, "Pstate transition:         deferred (attempt interval)\n");
     else if (!result->pstate_transition_attempted)
         fprintf(stream, "Pstate transition:         suppressed (observation only)\n");
     else if (result->pstate_transition_succeeded)
