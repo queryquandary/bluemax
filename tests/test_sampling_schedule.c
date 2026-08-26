@@ -25,7 +25,7 @@
 /** Verify startup schedules activity now and temperature one interval later. */
 static int test_initializes_startup_deadlines(void)
 {
-    const struct runtime_config config = {10, 1000, false};
+    const struct runtime_config config = {10, 1000};
     struct sampling_schedule schedule;
 
     CHECK(sampling_schedule_init(&schedule, &config, 1000) == 0);
@@ -37,7 +37,7 @@ static int test_initializes_startup_deadlines(void)
 /** Verify temperature becomes due exactly at its absolute deadline. */
 static int test_identifies_temperature_deadline(void)
 {
-    const struct runtime_config config = {10, 1000, false};
+    const struct runtime_config config = {10, 1000};
     struct sampling_schedule schedule;
     bool poll_temperature = true;
 
@@ -54,7 +54,7 @@ static int test_identifies_temperature_deadline(void)
 /** Verify ordinary completion advances from the absolute sample deadline. */
 static int test_advances_without_deadline_drift(void)
 {
-    const struct runtime_config config = {10, 1000, false};
+    const struct runtime_config config = {10, 1000};
     struct sampling_schedule schedule;
 
     CHECK(sampling_schedule_init(&schedule, &config, 1000) == 0);
@@ -71,7 +71,7 @@ static int test_advances_without_deadline_drift(void)
 /** Verify every elapsed activity deadline is skipped rather than replayed. */
 static int test_skips_missed_activity_deadlines(void)
 {
-    const struct runtime_config config = {10, 1000, false};
+    const struct runtime_config config = {10, 1000};
     struct sampling_schedule schedule;
 
     CHECK(sampling_schedule_init(&schedule, &config, 1000) == 0);
@@ -86,7 +86,7 @@ static int test_skips_missed_activity_deadlines(void)
 /** Verify one poll skips all elapsed temperature deadlines. */
 static int test_advances_polled_temperature_deadlines(void)
 {
-    const struct runtime_config config = {10, 1000, false};
+    const struct runtime_config config = {10, 1000};
     struct sampling_schedule schedule;
     bool poll_temperature;
 
@@ -105,7 +105,7 @@ static int test_advances_polled_temperature_deadlines(void)
 /** Verify a deadline crossed without polling remains due next cycle. */
 static int test_retains_unpolled_temperature_deadline(void)
 {
-    const struct runtime_config config = {10, 1000, false};
+    const struct runtime_config config = {10, 1000};
     struct sampling_schedule schedule;
     bool poll_temperature;
 
@@ -121,7 +121,7 @@ static int test_retains_unpolled_temperature_deadline(void)
 /** Verify independent deadlines when intervals are not evenly divisible. */
 static int test_schedules_non_divisible_intervals(void)
 {
-    const struct runtime_config config = {333, 1000, false};
+    const struct runtime_config config = {333, 1000};
     struct sampling_schedule schedule;
     bool poll_temperature;
 
@@ -149,7 +149,7 @@ static int test_schedules_non_divisible_intervals(void)
 /** Verify arithmetic failures leave the destination state unchanged. */
 static int test_rejects_deadline_overflow_transactionally(void)
 {
-    const struct runtime_config config = {10, 1000, false};
+    const struct runtime_config config = {10, 1000};
     struct sampling_schedule schedule;
     struct sampling_schedule unchanged;
 
@@ -178,7 +178,7 @@ static int test_rejects_deadline_overflow_transactionally(void)
 
     // Exercise overflow in the skipped-interval count itself, before deadline
     // multiplication is reached.
-    const struct runtime_config one_ms_config = {1, 100, false};
+    const struct runtime_config one_ms_config = {1, 100};
     schedule = (struct sampling_schedule){0, UINT64_MAX};
     unchanged = schedule;
     errno = 0;
@@ -191,11 +191,11 @@ static int test_rejects_deadline_overflow_transactionally(void)
 /** Verify null pointers and unusable intervals are rejected. */
 static int test_rejects_invalid_arguments(void)
 {
-    const struct runtime_config valid = {10, 1000, false};
+    const struct runtime_config valid = {10, 1000};
     static const struct runtime_config invalid[] = {
-        {0, 1000, false},
-        {10, 0, false},
-        {1000, 100, false},
+        {0, 1000},
+        {10, 0},
+        {1000, 100},
     };
     struct sampling_schedule schedule = {0};
     bool poll_temperature;
