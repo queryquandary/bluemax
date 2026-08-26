@@ -19,10 +19,10 @@ static bool handlers_installed;
 /** Record a shutdown request without performing work in signal context. */
 static void request_shutdown(int signal_number)
 {
-    // POSIX signal handlers must accept an int parameter containing 
-    // the signal number, but this handler treats SIGINT and SIGTERM 
-    // identically. Casting it to void prevents an -Wunused-parameter 
-    // warning while documenting that ignoring it is deliberate. 
+    // POSIX signal handlers must accept an int parameter containing
+    // the signal number, but this handler treats SIGINT and SIGTERM
+    // identically. Casting it to void prevents an -Wunused-parameter
+    // warning while documenting that ignoring it is deliberate.
     // It generates no runtime behavior or machine code in an optimized build.
     (void)signal_number;
     shutdown_requested = 1;
